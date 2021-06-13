@@ -583,18 +583,18 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
     //TODO: instead of having a hacky `with_adapters` parameter,
     // we should have `clear_device(device_id)` that specifically destroys
     // everything related to a logical device.
-    fn clear(&self, surface_guard: &mut Storage<Surface, SurfaceId>, with_adapters: bool) {
+    fn clear(&mut self, surface_guard: &mut Storage<Surface, SurfaceId>, with_adapters: bool) {
         use crate::resource::TextureViewInner;
         use hal::{device::Device as _, window::PresentationSurface as _};
 
-        let mut devices = self.devices.data.write();
+        let devices = self.devices.data.get_mut();
         for element in devices.map.iter_mut() {
             if let Element::Occupied(ref mut device, _) = *element {
                 device.prepare_to_die();
             }
         }
 
-        for element in self.samplers.data.write().map.drain(..) {
+        for element in self.samplers.data.get_mut().map.drain(..) {
             if let Element::Occupied(sampler, _) = element {
                 unsafe {
                     devices[sampler.device_id.value]
@@ -604,8 +604,8 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
             }
         }
         {
-            let textures = self.textures.data.read();
-            for element in self.texture_views.data.write().map.drain(..) {
+            let textures = self.textures.data.get_mut();
+            for element in self.texture_views.data.get_mut().map.drain(..) {
                 if let Element::Occupied(texture_view, _) = element {
                     match texture_view.inner {
                         TextureViewInner::Native { raw, source_id } => {
@@ -620,18 +620,18 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
             }
         }
 
-        for element in self.textures.data.write().map.drain(..) {
+        for element in self.textures.data.get_mut().map.drain(..) {
             if let Element::Occupied(texture, _) = element {
                 devices[texture.device_id.value].destroy_texture(texture);
             }
         }
-        for element in self.buffers.data.write().map.drain(..) {
+        for element in self.buffers.data.get_mut().map.drain(..) {
             if let Element::Occupied(buffer, _) = element {
                 //TODO: unmap if needed
                 devices[buffer.device_id.value].destroy_buffer(buffer);
             }
         }
-        for element in self.command_buffers.data.write().map.drain(..) {
+        for element in self.command_buffers.data.get_mut().map.drain(..) {
             if let Element::Occupied(command_buffer, _) = element {
                 let device = &devices[command_buffer.device_id.value];
                 device
@@ -639,14 +639,14 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
                     .after_submit(command_buffer, &device.raw, 0);
             }
         }
-        for element in self.bind_groups.data.write().map.drain(..) {
+        for element in self.bind_groups.data.get_mut().map.drain(..) {
             if let Element::Occupied(bind_group, _) = element {
                 let device = &devices[bind_group.device_id.value];
                 device.destroy_bind_group(bind_group);
             }
         }
 
-        for element in self.shader_modules.data.write().map.drain(..) {
+        for element in self.shader_modules.data.get_mut().map.drain(..) {
             if let Element::Occupied(module, _) = element {
                 let device = &devices[module.device_id.value];
                 unsafe {
@@ -654,7 +654,7 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
                 }
             }
         }
-        for element in self.bind_group_layouts.data.write().map.drain(..) {
+        for element in self.bind_group_layouts.data.get_mut().map.drain(..) {
             if let Element::Occupied(bgl, _) = element {
                 let device = &devices[bgl.device_id.value];
                 unsafe {
@@ -662,7 +662,7 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
                 }
             }
         }
-        for element in self.pipeline_layouts.data.write().map.drain(..) {
+        for element in self.pipeline_layouts.data.get_mut().map.drain(..) {
             if let Element::Occupied(pipeline_layout, _) = element {
                 let device = &devices[pipeline_layout.device_id.value];
                 unsafe {
@@ -670,7 +670,7 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
                 }
             }
         }
-        for element in self.compute_pipelines.data.write().map.drain(..) {
+        for element in self.compute_pipelines.data.get_mut().map.drain(..) {
             if let Element::Occupied(pipeline, _) = element {
                 let device = &devices[pipeline.device_id.value];
                 unsafe {
@@ -678,7 +678,7 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
                 }
             }
         }
-        for element in self.render_pipelines.data.write().map.drain(..) {
+        for element in self.render_pipelines.data.get_mut().map.drain(..) {
             if let Element::Occupied(pipeline, _) = element {
                 let device = &devices[pipeline.device_id.value];
                 unsafe {
@@ -687,7 +687,7 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
             }
         }
 
-        for (index, element) in self.swap_chains.data.write().map.drain(..).enumerate() {
+        for (index, element) in self.swap_chains.data.get_mut().map.drain(..).enumerate() {
             if let Element::Occupied(swap_chain, epoch) = element {
                 let device = &devices[swap_chain.device_id.value];
                 unsafe {
@@ -705,7 +705,7 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
             }
         }
 
-        for element in self.query_sets.data.write().map.drain(..) {
+        for element in self.query_sets.data.get_mut().map.drain(..) {
             if let Element::Occupied(query_set, _) = element {
                 let device = &devices[query_set.device_id.value];
                 unsafe {
@@ -720,7 +720,7 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
             }
         }
         if with_adapters {
-            self.adapters.data.write().map.clear();
+            self.adapters.data.get_mut().map.clear();
         }
     }
 }
@@ -760,7 +760,7 @@ impl<F: GlobalIdentityHandlerFactory> Hubs<F> {
 pub struct Global<G: GlobalIdentityHandlerFactory> {
     pub instance: Instance,
     pub surfaces: Registry<Surface, SurfaceId, G>,
-    hubs: Hubs<G>,
+    pub(crate) hubs: Hubs<G>,
 }
 
 impl<G: GlobalIdentityHandlerFactory> Global<G> {
@@ -773,9 +773,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         }
     }
 
-    pub fn clear_backend<B: GfxBackend>(&self, _dummy: ()) {
-        let mut surface_guard = self.surfaces.data.write();
-        let hub = B::hub(self);
+    pub fn clear_backend<B: GfxBackend>(&mut self, _dummy: ()) {
+        let surface_guard = self.surfaces.data.get_mut();
+        let hub = B::hub_mut(&mut self.hubs);
         // this is used for tests, which keep the adapter
         hub.clear(&mut *surface_guard, false);
     }
@@ -785,7 +785,7 @@ impl<G: GlobalIdentityHandlerFactory> Drop for Global<G> {
     fn drop(&mut self) {
         profiling::scope!("drop", "Global");
         log::info!("Dropping Global");
-        let mut surface_guard = self.surfaces.data.write();
+        let surface_guard = self.surfaces.data.get_mut();
 
         // destroy hubs before the instance gets dropped
         #[cfg(vulkan)]
@@ -820,15 +820,19 @@ impl<G: GlobalIdentityHandlerFactory> Drop for Global<G> {
 
 pub trait GfxBackend: hal::Backend {
     const VARIANT: Backend;
-    fn hub<G: GlobalIdentityHandlerFactory>(global: &Global<G>) -> &Hub<Self, G>;
+    fn hub<G: GlobalIdentityHandlerFactory>(hubs: &Hubs<G>) -> &Hub<Self, G>;
+    fn hub_mut<G: GlobalIdentityHandlerFactory>(hubs: &mut Hubs<G>) -> &mut Hub<Self, G>;
     fn get_surface_mut(surface: &mut Surface) -> &mut Self::Surface;
 }
 
 #[cfg(vulkan)]
 impl GfxBackend for backend::Vulkan {
     const VARIANT: Backend = Backend::Vulkan;
-    fn hub<G: GlobalIdentityHandlerFactory>(global: &Global<G>) -> &Hub<Self, G> {
-        &global.hubs.vulkan
+    fn hub<G: GlobalIdentityHandlerFactory>(hubs: &Hubs<G>) -> &Hub<Self, G> {
+        &hubs.vulkan
+    }
+    fn hub_mut<G: GlobalIdentityHandlerFactory>(hubs: &mut Hubs<G>) -> &mut Hub<Self, G> {
+        &mut hubs.vulkan
     }
     fn get_surface_mut(surface: &mut Surface) -> &mut Self::Surface {
         surface.vulkan.as_mut().unwrap()
@@ -838,8 +842,11 @@ impl GfxBackend for backend::Vulkan {
 #[cfg(metal)]
 impl GfxBackend for backend::Metal {
     const VARIANT: Backend = Backend::Metal;
-    fn hub<G: GlobalIdentityHandlerFactory>(global: &Global<G>) -> &Hub<Self, G> {
-        &global.hubs.metal
+    fn hub<G: GlobalIdentityHandlerFactory>(hubs: &Hubs<G>) -> &Hub<Self, G> {
+        &hubs.metal
+    }
+    fn hub_mut<G: GlobalIdentityHandlerFactory>(hubs: &mut Hubs<G>) -> &mut Hub<Self, G> {
+        &mut hubs.metal
     }
     fn get_surface_mut(surface: &mut Surface) -> &mut Self::Surface {
         surface.metal.as_mut().unwrap()
@@ -849,8 +856,11 @@ impl GfxBackend for backend::Metal {
 #[cfg(dx12)]
 impl GfxBackend for backend::Dx12 {
     const VARIANT: Backend = Backend::Dx12;
-    fn hub<G: GlobalIdentityHandlerFactory>(global: &Global<G>) -> &Hub<Self, G> {
-        &global.hubs.dx12
+    fn hub<G: GlobalIdentityHandlerFactory>(hubs: &Hubs<G>) -> &Hub<Self, G> {
+        &hubs.dx12
+    }
+    fn hub_mut<G: GlobalIdentityHandlerFactory>(hubs: &mut Hubs<G>) -> &mut Hub<Self, G> {
+        &mut hubs.dx12
     }
     fn get_surface_mut(surface: &mut Surface) -> &mut Self::Surface {
         surface.dx12.as_mut().unwrap()
@@ -860,8 +870,11 @@ impl GfxBackend for backend::Dx12 {
 #[cfg(dx11)]
 impl GfxBackend for backend::Dx11 {
     const VARIANT: Backend = Backend::Dx11;
-    fn hub<G: GlobalIdentityHandlerFactory>(global: &Global<G>) -> &Hub<Self, G> {
-        &global.hubs.dx11
+    fn hub<G: GlobalIdentityHandlerFactory>(hubs: &Hubs<G>) -> &Hub<Self, G> {
+        &hubs.dx11
+    }
+    fn hub_mut<G: GlobalIdentityHandlerFactory>(hubs: &mut Hubs<G>) -> &mut Hub<Self, G> {
+        &mut hubs.dx11
     }
     fn get_surface_mut(surface: &mut Surface) -> &mut Self::Surface {
         surface.dx11.as_mut().unwrap()
@@ -871,8 +884,11 @@ impl GfxBackend for backend::Dx11 {
 #[cfg(gl)]
 impl GfxBackend for backend::Gl {
     const VARIANT: Backend = Backend::Gl;
-    fn hub<G: GlobalIdentityHandlerFactory>(global: &Global<G>) -> &Hub<Self, G> {
-        &global.hubs.gl
+    fn hub<G: GlobalIdentityHandlerFactory>(hubs: &Hubs<G>) -> &Hub<Self, G> {
+        &hubs.gl
+    }
+    fn hub_mut<G: GlobalIdentityHandlerFactory>(hubs: &mut Hubs<G>) -> &mut Hub<Self, G> {
+        &mut hubs.gl
     }
     fn get_surface_mut(surface: &mut Surface) -> &mut Self::Surface {
         surface.gl.as_mut().unwrap()

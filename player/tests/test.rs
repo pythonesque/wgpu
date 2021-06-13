@@ -81,7 +81,7 @@ impl Test<'_> {
     fn run(
         self,
         dir: &Path,
-        global: &wgc::hub::Global<IdentityPassThroughFactory>,
+        global: &mut wgc::hub::Global<IdentityPassThroughFactory>,
         adapter: wgc::id::AdapterId,
         test_num: u32,
     ) {
@@ -175,7 +175,7 @@ impl Corpus {
         let dir = path.parent().unwrap();
         let corpus: Corpus = ron::de::from_reader(File::open(&path).unwrap()).unwrap();
 
-        let global = wgc::hub::Global::new("test", IdentityPassThroughFactory, corpus.backends);
+        let mut global = wgc::hub::Global::new("test", IdentityPassThroughFactory, corpus.backends);
         for &backend in BACKENDS {
             if !corpus.backends.contains(backend.into()) {
                 continue;
@@ -208,7 +208,7 @@ impl Corpus {
                     );
                     continue;
                 }
-                test.run(dir, &global, adapter, test_num);
+                test.run(dir, &mut global, adapter, test_num);
                 test_num += 1;
             }
         }

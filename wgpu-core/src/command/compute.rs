@@ -263,7 +263,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         profiling::scope!("run_compute_pass", "CommandEncoder");
         let scope = PassErrorScope::Pass(encoder_id);
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let (mut cmd_buf_guard, mut token) = hub.command_buffers.write(&mut token);

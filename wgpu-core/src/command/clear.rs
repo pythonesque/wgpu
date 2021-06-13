@@ -77,7 +77,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<(), ClearError> {
         profiling::scope!("CommandEncoder::fill_buffer");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (mut cmd_buf_guard, mut token) = hub.command_buffers.write(&mut token);
         let cmd_buf = CommandBuffer::get_encoder_mut(&mut *cmd_buf_guard, command_encoder_id)
@@ -173,7 +173,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<(), ClearError> {
         profiling::scope!("CommandEncoder::clear_image");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (mut cmd_buf_guard, mut token) = hub.command_buffers.write(&mut token);
         let cmd_buf = CommandBuffer::get_encoder_mut(&mut *cmd_buf_guard, command_encoder_id)

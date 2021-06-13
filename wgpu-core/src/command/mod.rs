@@ -213,7 +213,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> (id::CommandBufferId, Option<CommandEncoderError>) {
         profiling::scope!("finish", "CommandEncoder");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (swap_chain_guard, mut token) = hub.swap_chains.read(&mut token);
         //TODO: actually close the last recorded command buffer
@@ -246,7 +246,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<(), CommandEncoderError> {
         profiling::scope!("push_debug_group", "CommandEncoder");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let (mut cmd_buf_guard, _) = hub.command_buffers.write(&mut token);
@@ -266,7 +266,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<(), CommandEncoderError> {
         profiling::scope!("insert_debug_marker", "CommandEncoder");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let (mut cmd_buf_guard, _) = hub.command_buffers.write(&mut token);
@@ -285,7 +285,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<(), CommandEncoderError> {
         profiling::scope!("pop_debug_marker", "CommandEncoder");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let (mut cmd_buf_guard, _) = hub.command_buffers.write(&mut token);

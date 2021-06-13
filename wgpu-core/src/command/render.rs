@@ -1041,7 +1041,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         profiling::scope!("run_render_pass", "CommandEncoder");
         let scope = PassErrorScope::Pass(encoder_id);
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let (device_guard, mut token) = hub.devices.read(&mut token);

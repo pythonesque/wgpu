@@ -2835,7 +2835,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         adapter_id: id::AdapterId,
         surface_id: id::SurfaceId,
     ) -> Result<TextureFormat, instance::GetSwapChainPreferredFormatError> {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let (mut surface_guard, mut token) = self.surfaces.write(&mut token);
@@ -2854,7 +2854,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         &self,
         device_id: id::DeviceId,
     ) -> Result<wgt::Features, InvalidDevice> {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (device_guard, _) = hub.devices.read(&mut token);
         let device = device_guard.get(device_id).map_err(|_| InvalidDevice)?;
@@ -2866,7 +2866,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         &self,
         device_id: id::DeviceId,
     ) -> Result<wgt::Limits, InvalidDevice> {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (device_guard, _) = hub.devices.read(&mut token);
         let device = device_guard.get(device_id).map_err(|_| InvalidDevice)?;
@@ -2878,7 +2878,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         &self,
         device_id: id::DeviceId,
     ) -> Result<wgt::DownlevelProperties, InvalidDevice> {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (device_guard, _) = hub.devices.read(&mut token);
         let device = device_guard.get(device_id).map_err(|_| InvalidDevice)?;
@@ -2894,7 +2894,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> (id::BufferId, Option<resource::CreateBufferError>) {
         profiling::scope!("create_buffer", "Device");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let fid = hub.buffers.prepare(id_in);
 
@@ -3022,7 +3022,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         device_id: id::DeviceId,
         buffer_id: id::BufferId,
     ) -> Result<(), WaitIdleError> {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (device_guard, mut token) = hub.devices.read(&mut token);
         let last_submission = {
@@ -3048,7 +3048,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<(), resource::BufferAccessError> {
         profiling::scope!("set_buffer_sub_data", "Device");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let (device_guard, mut token) = hub.devices.read(&mut token);
@@ -3093,7 +3093,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<(), resource::BufferAccessError> {
         profiling::scope!("get_buffer_sub_data", "Device");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let (device_guard, mut token) = hub.devices.read(&mut token);
@@ -3118,7 +3118,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     }
 
     pub fn buffer_label<B: GfxBackend>(&self, id: id::BufferId) -> String {
-        B::hub(self).buffers.label_for_resource(id)
+        B::hub(&self.hubs).buffers.label_for_resource(id)
     }
 
     pub fn buffer_destroy<B: GfxBackend>(
@@ -3127,7 +3127,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<(), resource::DestroyError> {
         profiling::scope!("destroy", "Buffer");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         //TODO: lock pending writes separately, keep the device read-only
@@ -3170,7 +3170,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     pub fn buffer_drop<B: GfxBackend>(&self, buffer_id: id::BufferId, wait: bool) {
         profiling::scope!("drop", "Buffer");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         log::info!("Buffer {:?} is dropped", buffer_id);
@@ -3224,7 +3224,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> (id::TextureId, Option<resource::CreateTextureError>) {
         profiling::scope!("create_texture", "Device");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let fid = hub.textures.prepare(id_in);
 
@@ -3268,7 +3268,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     }
 
     pub fn texture_label<B: GfxBackend>(&self, id: id::TextureId) -> String {
-        B::hub(self).textures.label_for_resource(id)
+        B::hub(&self.hubs).textures.label_for_resource(id)
     }
 
     pub fn texture_destroy<B: GfxBackend>(
@@ -3277,7 +3277,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<(), resource::DestroyError> {
         profiling::scope!("destroy", "Texture");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         //TODO: lock pending writes separately, keep the device read-only
@@ -3320,7 +3320,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     pub fn texture_drop<B: GfxBackend>(&self, texture_id: id::TextureId, wait: bool) {
         profiling::scope!("drop", "Texture");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let (ref_count, last_submit_index, device_id) = {
@@ -3374,7 +3374,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> (id::TextureViewId, Option<resource::CreateTextureViewError>) {
         profiling::scope!("create_view", "Texture");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let fid = hub.texture_views.prepare(id_in);
 
@@ -3416,7 +3416,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     }
 
     pub fn texture_view_label<B: GfxBackend>(&self, id: id::TextureViewId) -> String {
-        B::hub(self).texture_views.label_for_resource(id)
+        B::hub(&self.hubs).texture_views.label_for_resource(id)
     }
 
     pub fn texture_view_drop<B: GfxBackend>(
@@ -3426,7 +3426,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<(), resource::TextureViewDestroyError> {
         profiling::scope!("drop", "TextureView");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let (last_submit_index, device_id) = {
@@ -3485,7 +3485,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> (id::SamplerId, Option<resource::CreateSamplerError>) {
         profiling::scope!("create_sampler", "Device");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let fid = hub.samplers.prepare(id_in);
 
@@ -3523,13 +3523,13 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     }
 
     pub fn sampler_label<B: GfxBackend>(&self, id: id::SamplerId) -> String {
-        B::hub(self).samplers.label_for_resource(id)
+        B::hub(&self.hubs).samplers.label_for_resource(id)
     }
 
     pub fn sampler_drop<B: GfxBackend>(&self, sampler_id: id::SamplerId) {
         profiling::scope!("drop", "Sampler");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let device_id = {
@@ -3567,7 +3567,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         profiling::scope!("create_bind_group_layout", "Device");
 
         let mut token = Token::root();
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let fid = hub.bind_group_layouts.prepare(id_in);
 
         let error = 'outer: loop {
@@ -3622,7 +3622,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     }
 
     pub fn bind_group_layout_label<B: GfxBackend>(&self, id: id::BindGroupLayoutId) -> String {
-        B::hub(self).bind_group_layouts.label_for_resource(id)
+        B::hub(&self.hubs).bind_group_layouts.label_for_resource(id)
     }
 
     pub fn bind_group_layout_drop<B: GfxBackend>(
@@ -3631,7 +3631,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) {
         profiling::scope!("drop", "BindGroupLayout");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let device_id = {
             let (mut bind_group_layout_guard, _) = hub.bind_group_layouts.write(&mut token);
@@ -3664,7 +3664,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) {
         profiling::scope!("create_pipeline_layout", "Device");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let fid = hub.pipeline_layouts.prepare(id_in);
 
@@ -3698,13 +3698,13 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     }
 
     pub fn pipeline_layout_label<B: GfxBackend>(&self, id: id::PipelineLayoutId) -> String {
-        B::hub(self).pipeline_layouts.label_for_resource(id)
+        B::hub(&self.hubs).pipeline_layouts.label_for_resource(id)
     }
 
     pub fn pipeline_layout_drop<B: GfxBackend>(&self, pipeline_layout_id: id::PipelineLayoutId) {
         profiling::scope!("drop", "PipelineLayout");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (device_id, ref_count) = {
             let (mut pipeline_layout_guard, _) = hub.pipeline_layouts.write(&mut token);
@@ -3740,7 +3740,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> (id::BindGroupId, Option<binding_model::CreateBindGroupError>) {
         profiling::scope!("create_bind_group", "Device");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let fid = hub.bind_groups.prepare(id_in);
 
@@ -3796,13 +3796,13 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     }
 
     pub fn bind_group_label<B: GfxBackend>(&self, id: id::BindGroupId) -> String {
-        B::hub(self).bind_groups.label_for_resource(id)
+        B::hub(&self.hubs).bind_groups.label_for_resource(id)
     }
 
     pub fn bind_group_drop<B: GfxBackend>(&self, bind_group_id: id::BindGroupId) {
         profiling::scope!("drop", "BindGroup");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let device_id = {
@@ -3840,7 +3840,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) {
         profiling::scope!("create_shader_module", "Device");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let fid = hub.shader_modules.prepare(id_in);
 
@@ -3887,13 +3887,13 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     }
 
     pub fn shader_module_label<B: GfxBackend>(&self, id: id::ShaderModuleId) -> String {
-        B::hub(self).shader_modules.label_for_resource(id)
+        B::hub(&self.hubs).shader_modules.label_for_resource(id)
     }
 
     pub fn shader_module_drop<B: GfxBackend>(&self, shader_module_id: id::ShaderModuleId) {
         profiling::scope!("drop", "ShaderModule");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (device_guard, mut token) = hub.devices.read(&mut token);
         let (module, _) = hub.shader_modules.unregister(shader_module_id, &mut token);
@@ -3919,7 +3919,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> (id::CommandEncoderId, Option<command::CommandAllocatorError>) {
         profiling::scope!("create_command_encoder", "Device");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let fid = hub.command_buffers.prepare(id_in);
 
@@ -3967,13 +3967,13 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     }
 
     pub fn command_buffer_label<B: GfxBackend>(&self, id: id::CommandBufferId) -> String {
-        B::hub(self).command_buffers.label_for_resource(id)
+        B::hub(&self.hubs).command_buffers.label_for_resource(id)
     }
 
     pub fn command_encoder_drop<B: GfxBackend>(&self, command_encoder_id: id::CommandEncoderId) {
         profiling::scope!("drop", "CommandEncoder");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let (mut device_guard, mut token) = hub.devices.write(&mut token);
@@ -4016,7 +4016,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> (id::RenderBundleId, Option<command::RenderBundleError>) {
         profiling::scope!("finish", "RenderBundleEncoder");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let fid = hub.render_bundles.prepare(id_in);
 
@@ -4061,12 +4061,12 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     }
 
     pub fn render_bundle_label<B: GfxBackend>(&self, id: id::RenderBundleId) -> String {
-        B::hub(self).render_bundles.label_for_resource(id)
+        B::hub(&self.hubs).render_bundles.label_for_resource(id)
     }
 
     pub fn render_bundle_drop<B: GfxBackend>(&self, render_bundle_id: id::RenderBundleId) {
         profiling::scope!("drop", "RenderBundle");
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let (device_guard, mut token) = hub.devices.read(&mut token);
@@ -4100,7 +4100,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> (id::QuerySetId, Option<resource::CreateQuerySetError>) {
         profiling::scope!("create_query_set", "Device");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let fid = hub.query_sets.prepare(id_in);
 
@@ -4143,7 +4143,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     pub fn query_set_drop<B: GfxBackend>(&self, query_set_id: id::QuerySetId) {
         profiling::scope!("drop", "QuerySet");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let device_id = {
@@ -4182,7 +4182,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) {
         profiling::scope!("create_render_pipeline", "Device");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let fid = hub.render_pipelines.prepare(id_in);
@@ -4233,7 +4233,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         id::BindGroupLayoutId,
         Option<binding_model::GetBindGroupLayoutError>,
     ) {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (pipeline_layout_guard, mut token) = hub.pipeline_layouts.read(&mut token);
 
@@ -4266,12 +4266,12 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     }
 
     pub fn render_pipeline_label<B: GfxBackend>(&self, id: id::RenderPipelineId) -> String {
-        B::hub(self).render_pipelines.label_for_resource(id)
+        B::hub(&self.hubs).render_pipelines.label_for_resource(id)
     }
 
     pub fn render_pipeline_drop<B: GfxBackend>(&self, render_pipeline_id: id::RenderPipelineId) {
         profiling::scope!("drop", "RenderPipeline");
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (device_guard, mut token) = hub.devices.read(&mut token);
 
@@ -4313,7 +4313,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) {
         profiling::scope!("create_compute_pipeline", "Device");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let fid = hub.compute_pipelines.prepare(id_in);
@@ -4364,7 +4364,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         id::BindGroupLayoutId,
         Option<binding_model::GetBindGroupLayoutError>,
     ) {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (pipeline_layout_guard, mut token) = hub.pipeline_layouts.read(&mut token);
 
@@ -4397,12 +4397,12 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     }
 
     pub fn compute_pipeline_label<B: GfxBackend>(&self, id: id::ComputePipelineId) -> String {
-        B::hub(self).compute_pipelines.label_for_resource(id)
+        B::hub(&self.hubs).compute_pipelines.label_for_resource(id)
     }
 
     pub fn compute_pipeline_drop<B: GfxBackend>(&self, compute_pipeline_id: id::ComputePipelineId) {
         profiling::scope!("drop", "ComputePipeline");
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (device_guard, mut token) = hub.devices.read(&mut token);
 
@@ -4474,7 +4474,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         log::info!("creating swap chain {:?}", desc);
         let sc_id = surface_id.to_swap_chain_id(B::VARIANT);
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let (mut surface_guard, mut token) = self.surfaces.write(&mut token);
@@ -4582,7 +4582,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         &self,
         device_id: id::DeviceId,
     ) -> Result<(), InvalidDevice> {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (device_guard, mut token) = hub.devices.read(&mut token);
         let device = device_guard.get(device_id).map_err(|_| InvalidDevice)?;
@@ -4601,7 +4601,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         device_id: id::DeviceId,
         force_wait: bool,
     ) -> Result<(), WaitIdleError> {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let callbacks = {
             let (device_guard, mut token) = hub.devices.read(&mut token);
@@ -4621,7 +4621,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<(), WaitIdleError> {
         profiling::scope!("poll_devices");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (device_guard, mut token) = hub.devices.read(&mut token);
         for (_, device) in device_guard.iter(B::VARIANT) {
@@ -4658,11 +4658,11 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     }
 
     pub fn device_label<B: GfxBackend>(&self, id: id::DeviceId) -> String {
-        B::hub(self).devices.label_for_resource(id)
+        B::hub(&self.hubs).devices.label_for_resource(id)
     }
 
     pub fn device_start_capture<B: GfxBackend>(&self, id: id::DeviceId) {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (device_guard, _) = hub.devices.read(&mut token);
         if let Ok(device) = device_guard.get(id) {
@@ -4671,7 +4671,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     }
 
     pub fn device_stop_capture<B: GfxBackend>(&self, id: id::DeviceId) {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (device_guard, _) = hub.devices.read(&mut token);
         if let Ok(device) = device_guard.get(id) {
@@ -4682,7 +4682,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     pub fn device_drop<B: GfxBackend>(&self, device_id: id::DeviceId) {
         profiling::scope!("drop", "Device");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (device, _) = hub.devices.unregister(device_id, &mut token);
         if let Some(mut device) = device {
@@ -4708,7 +4708,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<(), resource::BufferAccessError> {
         profiling::scope!("map_async", "Buffer");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (device_guard, mut token) = hub.devices.read(&mut token);
         let (pub_usage, internal_use) = match op.host {
@@ -4771,7 +4771,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<(*mut u8, u64), resource::BufferAccessError> {
         profiling::scope!("get_mapped_range", "Buffer");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (buffer_guard, _) = hub.buffers.read(&mut token);
         let buffer = buffer_guard
@@ -4837,7 +4837,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<Option<BufferMapPendingCallback>, resource::BufferAccessError> {
         profiling::scope!("unmap", "Buffer");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let (mut device_guard, mut token) = hub.devices.write(&mut token);

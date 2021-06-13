@@ -686,7 +686,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         backends_map! {
             let map = |(instance_field, backend, backend_info, backend_hub)| {
                 if let Some(ref inst) = *instance_field {
-                    let hub = backend_hub(self);
+                    let hub = backend_hub(&self.hubs);
                     if let Some(id_backend) = inputs.find(backend) {
                         for raw in inst.enumerate_adapters() {
                             let adapter = Adapter::new(raw);
@@ -839,7 +839,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                 if selected < adapters_backend.len() {
                     let adapter = Adapter::new(adapters_backend.swap_remove(selected));
                     log::info!("Adapter {} {:?}", info_adapter, adapter.raw.info);
-                    let id = backend_hub(self).adapters
+                    let id = backend_hub(&self.hubs).adapters
                         .prepare(id_backend.take().unwrap())
                         .assign(adapter, &mut token);
                     return Ok(id.0);
@@ -875,7 +875,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         &self,
         adapter_id: AdapterId,
     ) -> Result<wgt::AdapterInfo, InvalidAdapter> {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (adapter_guard, _) = hub.adapters.read(&mut token);
         adapter_guard
@@ -889,7 +889,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         adapter_id: AdapterId,
         format: wgt::TextureFormat,
     ) -> Result<wgt::TextureFormatFeatures, InvalidAdapter> {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (adapter_guard, _) = hub.adapters.read(&mut token);
         adapter_guard
@@ -902,7 +902,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         &self,
         adapter_id: AdapterId,
     ) -> Result<wgt::Features, InvalidAdapter> {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (adapter_guard, _) = hub.adapters.read(&mut token);
         adapter_guard
@@ -915,7 +915,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         &self,
         adapter_id: AdapterId,
     ) -> Result<wgt::Limits, InvalidAdapter> {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (adapter_guard, _) = hub.adapters.read(&mut token);
         adapter_guard
@@ -928,7 +928,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         &self,
         adapter_id: AdapterId,
     ) -> Result<wgt::DownlevelProperties, InvalidAdapter> {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (adapter_guard, _) = hub.adapters.read(&mut token);
         adapter_guard
@@ -940,7 +940,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     pub fn adapter_drop<B: GfxBackend>(&self, adapter_id: AdapterId) {
         profiling::scope!("drop", "Adapter");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (mut adapter_guard, _) = hub.adapters.write(&mut token);
 
@@ -965,7 +965,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> (DeviceId, Option<RequestDeviceError>) {
         profiling::scope!("request_device", "Adapter");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let fid = hub.devices.prepare(id_in);
 

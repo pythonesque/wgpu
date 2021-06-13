@@ -294,7 +294,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<(), QueueWriteError> {
         profiling::scope!("write_buffer", "Queue");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (mut device_guard, mut token) = hub.devices.write(&mut token);
         let device = device_guard
@@ -401,7 +401,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<(), QueueWriteError> {
         profiling::scope!("write_texture", "Queue");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (mut device_guard, mut token) = hub.devices.write(&mut token);
         let device = device_guard
@@ -593,7 +593,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<(), QueueSubmitError> {
         profiling::scope!("submit", "Queue");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let callbacks = {
@@ -832,7 +832,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         &self,
         queue_id: id::QueueId,
     ) -> Result<f32, InvalidQueue> {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let (device_guard, _) = hub.devices.read(&mut token);
         match device_guard.get(queue_id) {

@@ -141,7 +141,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<SwapChainOutput, SwapChainError> {
         profiling::scope!("get_next_texture", "SwapChain");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
         let fid = hub.texture_views.prepare(view_id_in);
 
@@ -244,7 +244,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<SwapChainStatus, SwapChainError> {
         profiling::scope!("present", "SwapChain");
 
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let (mut surface_guard, mut token) = self.surfaces.write(&mut token);

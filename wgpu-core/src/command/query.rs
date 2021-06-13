@@ -290,7 +290,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         query_set_id: id::QuerySetId,
         query_index: u32,
     ) -> Result<(), QueryError> {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let (mut cmd_buf_guard, mut token) = hub.command_buffers.write(&mut token);
@@ -330,7 +330,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         destination: id::BufferId,
         destination_offset: BufferAddress,
     ) -> Result<(), QueryError> {
-        let hub = B::hub(self);
+        let hub = B::hub(&self.hubs);
         let mut token = Token::root();
 
         let (mut cmd_buf_guard, mut token) = hub.command_buffers.write(&mut token);
