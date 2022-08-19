@@ -1789,15 +1789,23 @@ impl<B: GfxBackend> Device<B> {
         }
 
         if let Some(start_binding) = write_map.keys().next().cloned() {
-            let descriptors = write_map.into_iter().flat_map(|(_, list)| list);
-            unsafe {
-                let write = hal::pso::DescriptorSetWrite {
+            /// TODO: Figure out why Rust requires this?  Apparently it's not inferring
+            /// lifetimes properly.
+            unsafe fn write_descriptor_set<'a, K, B: hal::Backend>(
+                raw: &'a B::Device,
+                desc_set: &'a mut descriptor::DescriptorSet<B>,
+                start_binding: u32,
+                write_map: BTreeMap<K, SmallVec<[hal::pso::Descriptor<'a, B>; 1]>>,
+            ) {
+                raw.write_descriptor_set(hal::pso::DescriptorSetWrite {
                     set: desc_set.raw_mut(),
                     binding: start_binding,
                     array_offset: 0,
-                    descriptors,
-                };
-                self.raw.write_descriptor_set(write);
+                    descriptors: write_map.into_iter().flat_map(|(_, list)| list),
+                });
+            }
+            unsafe {
+                write_descriptor_set(&self.raw, &mut desc_set, start_binding, write_map);
             }
         }
 
