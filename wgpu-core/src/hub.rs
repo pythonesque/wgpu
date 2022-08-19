@@ -19,12 +19,12 @@ use crate::{
     Epoch, Index,
 };
 
-use parking_lot::{Mutex};
+use parking_lot::Mutex;
 use wgt::Backend;
 
+use self::rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::id::QuerySetId;
 use crate::resource::QuerySet;
-use self::rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(debug_assertions)]
 use std::cell::Cell;
 use std::{fmt::Debug, marker::PhantomData, ops};
