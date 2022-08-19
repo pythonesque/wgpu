@@ -24,9 +24,54 @@ use wgt::Backend;
 
 use crate::id::QuerySetId;
 use crate::resource::QuerySet;
+use self::rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(debug_assertions)]
 use std::cell::Cell;
-use std::{fmt::Debug, marker::PhantomData, ops, sync::{RwLock, RwLockReadGuard, RwLockWriteGuard}};
+use std::{fmt::Debug, marker::PhantomData, ops};
+
+#[cfg(apple)]
+mod rwlock {
+    pub use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+}
+#[cfg(not(apple))]
+mod rwlock {
+    use core::ops::{Deref, DerefMut};
+    use std::sync::RwLock as RwLock_;
+    pub use std::sync::{RwLockReadGuard, RwLockWriteGuard};
+
+    #[derive(Debug)]
+    pub struct RwLock<T>(RwLock_<T>);
+
+    impl<T> Deref for RwLock<T> {
+        type Target = RwLock_<T>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl<T> DerefMut for RwLock<T> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.0
+        }
+    }
+
+    impl<T> RwLock<T> {
+        pub fn new(data: T) -> Self {
+            Self(RwLock_::new(data))
+        }
+    }
+
+    impl<T> RwLock<T> {
+        pub fn read(&self) -> RwLockReadGuard<'_, T> {
+            self.0.read().unwrap()
+        }
+
+        pub fn write(&self) -> RwLockWriteGuard<'_, T> {
+            self.0.write().unwrap()
+        }
+    }
+}
 
 /// A simple structure to manage identities of objects.
 #[derive(Debug)]
@@ -459,12 +504,12 @@ impl<I: TypedId + Copy, T> FutureId<'_, I, T> {
     }
 
     pub fn assign<'a, A: Access<T>>(self, value: T, _: &'a mut Token<A>) -> Valid<I> {
-        self.data.write().unwrap().insert(self.id, value);
+        self.data.write().insert(self.id, value);
         Valid(self.id)
     }
 
     pub fn assign_error<'a, A: Access<T>>(self, label: &str, _: &'a mut Token<A>) -> I {
-        self.data.write().unwrap().insert_error(self.id, label);
+        self.data.write().insert_error(self.id, label);
         self.id
     }
 }
@@ -484,14 +529,14 @@ impl<T: Resource, I: TypedId + Copy, F: IdentityHandlerFactory<I>> Registry<T, I
         &'a self,
         _token: &'a mut Token<A>,
     ) -> (RwLockReadGuard<'a, Storage<T, I>>, Token<'a, T>) {
-        (self.data.read().unwrap(), Token::new())
+        (self.data.read(), Token::new())
     }
 
     pub(crate) fn write<'a, A: Access<T>>(
         &'a self,
         _token: &'a mut Token<A>,
     ) -> (RwLockWriteGuard<'a, Storage<T, I>>, Token<'a, T>) {
-        (self.data.write().unwrap(), Token::new())
+        (self.data.write(), Token::new())
     }
 
     pub fn unregister_locked(&self, id: I, guard: &mut Storage<T, I>) -> Option<T> {
@@ -507,7 +552,7 @@ impl<T: Resource, I: TypedId + Copy, F: IdentityHandlerFactory<I>> Registry<T, I
         id: I,
         _token: &'a mut Token<A>,
     ) -> (Option<T>, Token<'a, T>) {
-        let value = self.data.write().unwrap().remove(id);
+        let value = self.data.write().remove(id);
         //Note: careful about the order here!
         self.identity.free(id);
         //Returning None is legal if it's an error ID
@@ -515,7 +560,7 @@ impl<T: Resource, I: TypedId + Copy, F: IdentityHandlerFactory<I>> Registry<T, I
     }
 
     pub fn label_for_resource(&self, id: I) -> String {
-        let guard = self.data.read().unwrap();
+        let guard = self.data.read();
 
         let type_name = guard.kind;
         match guard.get(id) {
@@ -587,14 +632,14 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
         use crate::resource::TextureViewInner;
         use hal::{device::Device as _, window::PresentationSurface as _};
 
-        let mut devices = self.devices.data.write().unwrap();
+        let mut devices = self.devices.data.write();
         for element in devices.map.iter_mut() {
             if let Element::Occupied(ref mut device, _) = *element {
                 device.prepare_to_die();
             }
         }
 
-        for element in self.samplers.data.write().unwrap().map.drain(..) {
+        for element in self.samplers.data.write().map.drain(..) {
             if let Element::Occupied(sampler, _) = element {
                 unsafe {
                     devices[sampler.device_id.value]
@@ -604,8 +649,8 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
             }
         }
         {
-            let textures = self.textures.data.read().unwrap();
-            for element in self.texture_views.data.write().unwrap().map.drain(..) {
+            let textures = self.textures.data.read();
+            for element in self.texture_views.data.write().map.drain(..) {
                 if let Element::Occupied(texture_view, _) = element {
                     match texture_view.inner {
                         TextureViewInner::Native { raw, source_id } => {
@@ -620,18 +665,18 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
             }
         }
 
-        for element in self.textures.data.write().unwrap().map.drain(..) {
+        for element in self.textures.data.write().map.drain(..) {
             if let Element::Occupied(texture, _) = element {
                 devices[texture.device_id.value].destroy_texture(texture);
             }
         }
-        for element in self.buffers.data.write().unwrap().map.drain(..) {
+        for element in self.buffers.data.write().map.drain(..) {
             if let Element::Occupied(buffer, _) = element {
                 //TODO: unmap if needed
                 devices[buffer.device_id.value].destroy_buffer(buffer);
             }
         }
-        for element in self.command_buffers.data.write().unwrap().map.drain(..) {
+        for element in self.command_buffers.data.write().map.drain(..) {
             if let Element::Occupied(command_buffer, _) = element {
                 let device = &devices[command_buffer.device_id.value];
                 device
@@ -639,14 +684,14 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
                     .after_submit(command_buffer, &device.raw, 0);
             }
         }
-        for element in self.bind_groups.data.write().unwrap().map.drain(..) {
+        for element in self.bind_groups.data.write().map.drain(..) {
             if let Element::Occupied(bind_group, _) = element {
                 let device = &devices[bind_group.device_id.value];
                 device.destroy_bind_group(bind_group);
             }
         }
 
-        for element in self.shader_modules.data.write().unwrap().map.drain(..) {
+        for element in self.shader_modules.data.write().map.drain(..) {
             if let Element::Occupied(module, _) = element {
                 let device = &devices[module.device_id.value];
                 unsafe {
@@ -654,7 +699,7 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
                 }
             }
         }
-        for element in self.bind_group_layouts.data.write().unwrap().map.drain(..) {
+        for element in self.bind_group_layouts.data.write().map.drain(..) {
             if let Element::Occupied(bgl, _) = element {
                 let device = &devices[bgl.device_id.value];
                 unsafe {
@@ -662,7 +707,7 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
                 }
             }
         }
-        for element in self.pipeline_layouts.data.write().unwrap().map.drain(..) {
+        for element in self.pipeline_layouts.data.write().map.drain(..) {
             if let Element::Occupied(pipeline_layout, _) = element {
                 let device = &devices[pipeline_layout.device_id.value];
                 unsafe {
@@ -670,7 +715,7 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
                 }
             }
         }
-        for element in self.compute_pipelines.data.write().unwrap().map.drain(..) {
+        for element in self.compute_pipelines.data.write().map.drain(..) {
             if let Element::Occupied(pipeline, _) = element {
                 let device = &devices[pipeline.device_id.value];
                 unsafe {
@@ -678,7 +723,7 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
                 }
             }
         }
-        for element in self.render_pipelines.data.write().unwrap().map.drain(..) {
+        for element in self.render_pipelines.data.write().map.drain(..) {
             if let Element::Occupied(pipeline, _) = element {
                 let device = &devices[pipeline.device_id.value];
                 unsafe {
@@ -687,7 +732,7 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
             }
         }
 
-        for (index, element) in self.swap_chains.data.write().unwrap().map.drain(..).enumerate() {
+        for (index, element) in self.swap_chains.data.write().map.drain(..).enumerate() {
             if let Element::Occupied(swap_chain, epoch) = element {
                 let device = &devices[swap_chain.device_id.value];
                 unsafe {
@@ -705,7 +750,7 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
             }
         }
 
-        for element in self.query_sets.data.write().unwrap().map.drain(..) {
+        for element in self.query_sets.data.write().map.drain(..) {
             if let Element::Occupied(query_set, _) = element {
                 let device = &devices[query_set.device_id.value];
                 unsafe {
@@ -720,7 +765,7 @@ impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
             }
         }
         if with_adapters {
-            self.adapters.data.write().unwrap().map.clear();
+            self.adapters.data.write().map.clear();
         }
     }
 }
@@ -774,7 +819,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     }
 
     pub fn clear_backend<B: GfxBackend>(&self, _dummy: ()) {
-        let mut surface_guard = self.surfaces.data.write().unwrap();
+        let mut surface_guard = self.surfaces.data.write();
         let hub = B::hub(self);
         // this is used for tests, which keep the adapter
         hub.clear(&mut *surface_guard, false);
@@ -785,7 +830,7 @@ impl<G: GlobalIdentityHandlerFactory> Drop for Global<G> {
     fn drop(&mut self) {
         profiling::scope!("drop", "Global");
         log::info!("Dropping Global");
-        let mut surface_guard = self.surfaces.data.write().unwrap();
+        let mut surface_guard = self.surfaces.data.write();
 
         // destroy hubs before the instance gets dropped
         #[cfg(vulkan)]
