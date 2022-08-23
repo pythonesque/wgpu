@@ -1963,6 +1963,7 @@ impl<'a> BufferSliceMut<'a> {
             None => mc.total_size,
         };
         mc.initial_range = self.offset..end;
+        self.map_context.get_mut().initial_range = self.offset..end;
         unsafe {
             // Safety: synchronizes with any unmap requests due to requiring &mut access.
             Context::buffer_map_async(

@@ -6,8 +6,8 @@ use crate::{
     binding_model, command, conv,
     device::life::WaitIdleError,
     hub::{
-        GfxBackend, Global, GlobalIdentityHandlerFactory, Hub, Input, InvalidId, RwLockWriteGuard,
-        Storage, Token,
+        GfxBackend, Global, GlobalIdentityHandlerFactory, Hub, Input, InvalidId, Mutex, MutexGuard,
+        RwLockWriteGuard, Storage, Token,
     },
     id, instance,
     memory_init_tracker::{MemoryInitKind, MemoryInitTracker, MemoryInitTrackerAction},
@@ -25,7 +25,6 @@ use hal::{
     device::Device as _,
     window::{PresentationSurface as _, Surface as _},
 };
-use parking_lot::{Mutex, MutexGuard};
 use thiserror::Error;
 use wgt::{BufferAddress, InputStepMode, TextureDimension, TextureFormat, TextureViewDimension};
 

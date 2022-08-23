@@ -19,7 +19,7 @@ use crate::{
     Epoch, Index,
 };
 
-use parking_lot::{Mutex, MutexGuard};
+pub use parking_lot::{Mutex, MutexGuard};
 use wgt::Backend;
 
 pub use self::rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};

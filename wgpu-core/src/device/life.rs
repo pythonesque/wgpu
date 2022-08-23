@@ -12,7 +12,7 @@ use crate::{
         queue::TempResource,
         DeviceError,
     },
-    hub::{GfxBackend, GlobalIdentityHandlerFactory, Hub, Storage, Token},
+    hub::{GfxBackend, GlobalIdentityHandlerFactory, Hub, Mutex, MutexGuard, Storage, Token},
     id, resource,
     track::TrackerSet,
     RefCount, Stored, SubmissionIndex,
@@ -20,7 +20,6 @@ use crate::{
 
 use copyless::VecHelper as _;
 use hal::device::Device as _;
-use parking_lot::{Mutex, MutexGuard};
 use thiserror::Error;
 
 use std::{mem, sync::atomic::Ordering};
@@ -144,7 +143,7 @@ impl<B: hal::Backend> NonReferencedResources<B> {
         memory_allocator_mutex: &Mutex<alloc::MemoryAllocator<B>>,
         descriptor_allocator_mutex: &Mutex<DescriptorAllocator<B>>,
     ) {
-        const MAX_LOCK_CHUNKS: usize = 256;
+        const MAX_LOCK_CHUNKS: usize = /*256*/ usize::MAX;
         if !self.buffers.is_empty() || !self.images.is_empty() {
             let mut allocator = memory_allocator_mutex.lock();
             for (i, (raw, memory)) in self.buffers.drain(..).enumerate() {
@@ -155,7 +154,7 @@ impl<B: hal::Backend> NonReferencedResources<B> {
                     MutexGuard::bump(&mut allocator);
                 }
             }
-            MutexGuard::bump(&mut allocator);
+            // MutexGuard::bump(&mut allocator);
             for (i, (raw, memory)) in self.images.drain(..).enumerate() {
                 log::trace!("Image {:?} is destroyed with memory {:?}", raw, memory);
                 device.destroy_image(raw);
