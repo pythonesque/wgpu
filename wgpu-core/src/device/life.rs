@@ -143,7 +143,7 @@ impl<B: hal::Backend> NonReferencedResources<B> {
         memory_allocator_mutex: &Mutex<alloc::MemoryAllocator<B>>,
         descriptor_allocator_mutex: &Mutex<DescriptorAllocator<B>>,
     ) {
-        const MAX_LOCK_CHUNKS: usize = /*256*/ usize::MAX;
+        const MAX_LOCK_CHUNKS: usize = /*usize::MAX*/ 256;
         if !self.buffers.is_empty() || !self.images.is_empty() {
             let mut allocator = memory_allocator_mutex.lock();
             for (i, (raw, memory)) in self.buffers.drain(..).enumerate() {
@@ -154,7 +154,7 @@ impl<B: hal::Backend> NonReferencedResources<B> {
                     MutexGuard::bump(&mut allocator);
                 }
             }
-            // MutexGuard::bump(&mut allocator);
+            MutexGuard::bump(&mut allocator);
             for (i, (raw, memory)) in self.images.drain(..).enumerate() {
                 log::trace!("Image {:?} is destroyed with memory {:?}", raw, memory);
                 device.destroy_image(raw);
