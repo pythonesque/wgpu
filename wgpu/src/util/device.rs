@@ -63,7 +63,7 @@ impl DeviceExt for crate::Device {
                 mapped_at_creation: true,
             };
 
-            let buffer = self.create_buffer(&wgt_descriptor);
+            let mut buffer = self.create_buffer(&wgt_descriptor);
 
             buffer.slice(..).get_mapped_range_mut()[..unpadded_size as usize]
                 .copy_from_slice(descriptor.contents);

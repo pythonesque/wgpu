@@ -142,10 +142,10 @@ impl RenderBundleEncoder {
         hub: &Hub<B, G>,
         token: &mut Token<Device<B>>,
     ) -> Result<RenderBundle, RenderBundleError> {
-        let (pipeline_layout_guard, mut token) = hub.pipeline_layouts.read(token);
+        let (buffer_guard, mut token) = hub.buffers.read(token);
+        let (pipeline_layout_guard, mut token) = hub.pipeline_layouts.read(&mut token);
         let (bind_group_guard, mut token) = hub.bind_groups.read(&mut token);
-        let (pipeline_guard, mut token) = hub.render_pipelines.read(&mut token);
-        let (buffer_guard, _) = hub.buffers.read(&mut token);
+        let (pipeline_guard, _) = hub.render_pipelines.read(&mut token);
 
         let mut state = State {
             trackers: TrackerSet::new(self.parent_id.backend()),
@@ -618,7 +618,7 @@ impl RenderBundle {
                         .get(buffer_id)
                         .unwrap()
                         .raw
-                        .as_ref()
+                        .as_deref()
                         .ok_or(ExecutionError::DestroyedBuffer(buffer_id))?;
                     let range = hal::buffer::SubRange {
                         offset,
@@ -636,7 +636,7 @@ impl RenderBundle {
                         .get(buffer_id)
                         .unwrap()
                         .raw
-                        .as_ref()
+                        .as_deref()
                         .ok_or(ExecutionError::DestroyedBuffer(buffer_id))?;
                     let range = hal::buffer::SubRange {
                         offset,
@@ -714,7 +714,7 @@ impl RenderBundle {
                         .get(buffer_id)
                         .unwrap()
                         .raw
-                        .as_ref()
+                        .as_deref()
                         .ok_or(ExecutionError::DestroyedBuffer(buffer_id))?;
                     cmd_buf.draw_indirect(buffer, offset, 1, 0);
                 }
@@ -728,7 +728,7 @@ impl RenderBundle {
                         .get(buffer_id)
                         .unwrap()
                         .raw
-                        .as_ref()
+                        .as_deref()
                         .ok_or(ExecutionError::DestroyedBuffer(buffer_id))?;
                     cmd_buf.draw_indexed_indirect(buffer, offset, 1, 0);
                 }

@@ -1047,6 +1047,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let (device_guard, mut token) = hub.devices.read(&mut token);
 
         let (cmd_buf_raw, trackers, query_reset_state) = {
+            let (buffer_guard, mut token) = hub.buffers.read(&mut token);
+            let (texture_guard, mut token) = hub.textures.read(&mut token);
+
             // read-only lock guard
             let (mut cmb_guard, mut token) = hub.command_buffers.write(&mut token);
 
@@ -1078,8 +1081,6 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             let (bind_group_guard, mut token) = hub.bind_groups.read(&mut token);
             let (pipeline_guard, mut token) = hub.render_pipelines.read(&mut token);
             let (query_set_guard, mut token) = hub.query_sets.read(&mut token);
-            let (buffer_guard, mut token) = hub.buffers.read(&mut token);
-            let (texture_guard, mut token) = hub.textures.read(&mut token);
             let (view_guard, _) = hub.texture_views.read(&mut token);
 
             log::trace!(
@@ -1325,7 +1326,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                         check_buffer_usage(buffer.usage, BufferUsage::INDEX).map_pass_err(scope)?;
                         let &(ref buf_raw, _) = buffer
                             .raw
-                            .as_ref()
+                            .as_deref()
                             .ok_or(RenderCommandError::DestroyedBuffer(buffer_id))
                             .map_pass_err(scope)?;
 
@@ -1375,7 +1376,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                             .map_pass_err(scope)?;
                         let &(ref buf_raw, _) = buffer
                             .raw
-                            .as_ref()
+                            .as_deref()
                             .ok_or(RenderCommandError::DestroyedBuffer(buffer_id))
                             .map_pass_err(scope)?;
 
@@ -1641,7 +1642,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                             .map_pass_err(scope)?;
                         let &(ref indirect_raw, _) = indirect_buffer
                             .raw
-                            .as_ref()
+                            .as_deref()
                             .ok_or(RenderCommandError::DestroyedBuffer(buffer_id))
                             .map_pass_err(scope)?;
 
@@ -1724,7 +1725,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                             .map_pass_err(scope)?;
                         let &(ref indirect_raw, _) = indirect_buffer
                             .raw
-                            .as_ref()
+                            .as_deref()
                             .ok_or(RenderCommandError::DestroyedBuffer(buffer_id))
                             .map_pass_err(scope)?;
 
@@ -1738,7 +1739,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                             .map_pass_err(scope)?;
                         let &(ref count_raw, _) = count_buffer
                             .raw
-                            .as_ref()
+                            .as_deref()
                             .ok_or(RenderCommandError::DestroyedBuffer(count_buffer_id))
                             .map_pass_err(scope)?;
 
@@ -1971,10 +1972,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             (raw, trackers, query_reset_state)
         };
 
-        let (mut cmb_guard, mut token) = hub.command_buffers.write(&mut token);
-        let (query_set_guard, mut token) = hub.query_sets.read(&mut token);
         let (buffer_guard, mut token) = hub.buffers.read(&mut token);
-        let (texture_guard, _) = hub.textures.read(&mut token);
+        let (texture_guard, mut token) = hub.textures.read(&mut token);
+        let (mut cmb_guard, mut token) = hub.command_buffers.write(&mut token);
+        let (query_set_guard, _) = hub.query_sets.read(&mut token);
 
         let cmd_buf =
             CommandBuffer::get_encoder_mut(&mut *cmb_guard, encoder_id).map_pass_err(scope)?;

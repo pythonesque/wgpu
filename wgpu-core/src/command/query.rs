@@ -333,9 +333,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let hub = B::hub(self);
         let mut token = Token::root();
 
+        let (buffer_guard, mut token) = hub.buffers.read(&mut token);
         let (mut cmd_buf_guard, mut token) = hub.command_buffers.write(&mut token);
-        let (query_set_guard, mut token) = hub.query_sets.read(&mut token);
-        let (buffer_guard, _) = hub.buffers.read(&mut token);
+        let (query_set_guard, _) = hub.query_sets.read(&mut token);
 
         let cmd_buf = CommandBuffer::get_encoder_mut(&mut cmd_buf_guard, command_encoder_id)?;
         let cmd_buf_raw = cmd_buf.raw.last_mut().unwrap();
@@ -365,7 +365,8 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .buffers
             .use_replace(&*buffer_guard, destination, (), BufferUse::COPY_DST)
             .map_err(QueryError::InvalidBuffer)?;
-        let dst_barrier = dst_pending.map(|pending| pending.into_hal(dst_buffer));
+        let &(ref dst_raw, _) = dst_buffer.raw.as_deref().expect("Texture is destroyed");
+        let dst_barrier = dst_pending.map(|pending| pending.into_hal(dst_raw));
 
         if !dst_buffer.usage.contains(wgt::BufferUsage::COPY_DST) {
             return Err(ResolveError::MissingBufferUsage.into());
@@ -408,7 +409,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             cmd_buf_raw.copy_query_pool_results(
                 &query_set.raw,
                 start_query..end_query,
-                &dst_buffer.raw.as_ref().unwrap().0,
+                dst_raw,
                 destination_offset,
                 stride,
                 hal::query::ResultFlags::WAIT | hal::query::ResultFlags::BITS_64,

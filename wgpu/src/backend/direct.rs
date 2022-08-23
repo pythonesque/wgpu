@@ -608,7 +608,7 @@ pub(crate) struct CommandEncoder {
     open: bool,
 }
 
-impl crate::Context for Context {
+unsafe impl crate::Context for Context {
     type AdapterId = wgc::id::AdapterId;
     type DeviceId = Device;
     type QueueId = wgc::id::QueueId;
@@ -1305,7 +1305,7 @@ impl crate::Context for Context {
         error_sink.uncaptured_handler = Box::new(handler);
     }
 
-    fn buffer_map_async(
+    unsafe fn buffer_map_async(
         &self,
         buffer: &Self::BufferId,
         mode: MapMode,
@@ -1342,7 +1342,7 @@ impl crate::Context for Context {
         future
     }
 
-    fn buffer_get_mapped_range(
+    unsafe fn buffer_get_mapped_range(
         &self,
         buffer: &Self::BufferId,
         sub_range: Range<wgt::BufferAddress>,
@@ -1362,7 +1362,7 @@ impl crate::Context for Context {
         }
     }
 
-    fn buffer_unmap(&self, buffer: &Self::BufferId) {
+    unsafe fn buffer_unmap(&self, buffer: &Self::BufferId) {
         let global = &self.0;
         match wgc::gfx_select!(buffer.id => global.buffer_unmap(buffer.id)) {
             Ok(()) => (),
@@ -1446,25 +1446,25 @@ impl crate::Context for Context {
         wgc::gfx_select!(*adapter => global.adapter_drop(*adapter))
     }
 
-    fn buffer_destroy(&self, buffer: &Self::BufferId) {
+    unsafe fn buffer_destroy(&self, buffer: &Self::BufferId) {
         let global = &self.0;
         match wgc::gfx_select!(buffer.id => global.buffer_destroy(buffer.id)) {
             Ok(()) => (),
             Err(err) => self.handle_error_fatal(err, "Buffer::destroy"),
         }
     }
-    fn buffer_drop(&self, buffer: &Self::BufferId) {
+    unsafe fn buffer_drop(&self, buffer: &Self::BufferId) {
         let global = &self.0;
         wgc::gfx_select!(buffer.id => global.buffer_drop(buffer.id, false))
     }
-    fn texture_destroy(&self, texture: &Self::TextureId) {
+    unsafe fn texture_destroy(&self, texture: &Self::TextureId) {
         let global = &self.0;
         match wgc::gfx_select!(texture.id => global.texture_destroy(texture.id)) {
             Ok(()) => (),
             Err(err) => self.handle_error_fatal(err, "Texture::destroy"),
         }
     }
-    fn texture_drop(&self, texture: &Self::TextureId) {
+    unsafe fn texture_drop(&self, texture: &Self::TextureId) {
         let global = &self.0;
         wgc::gfx_select!(texture.id => global.texture_drop(texture.id, false))
     }
@@ -1868,7 +1868,7 @@ impl crate::Context for Context {
         id
     }
 
-    fn queue_write_buffer(
+    unsafe fn queue_write_buffer(
         &self,
         queue: &Self::QueueId,
         buffer: &Self::BufferId,
@@ -1884,7 +1884,7 @@ impl crate::Context for Context {
         }
     }
 
-    fn queue_write_texture(
+    unsafe fn queue_write_texture(
         &self,
         queue: &Self::QueueId,
         texture: crate::ImageCopyTexture,

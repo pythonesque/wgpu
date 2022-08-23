@@ -885,7 +885,7 @@ fn future_map_async(result: JsFutureResult) -> Result<(), crate::BufferAsyncErro
     result.map(|_| ()).map_err(|_| crate::BufferAsyncError)
 }
 
-impl crate::Context for Context {
+unsafe impl crate::Context for Context {
     type AdapterId = Sendable<web_sys::GpuAdapter>;
     type DeviceId = Sendable<web_sys::GpuDevice>;
     type QueueId = Sendable<web_sys::GpuQueue>;
@@ -1543,7 +1543,7 @@ impl crate::Context for Context {
         // TODO:
     }
 
-    fn buffer_map_async(
+    unsafe fn buffer_map_async(
         &self,
         buffer: &Self::BufferId,
         mode: crate::MapMode,
@@ -1561,7 +1561,7 @@ impl crate::Context for Context {
         )
     }
 
-    fn buffer_get_mapped_range(
+    unsafe fn buffer_get_mapped_range(
         &self,
         buffer: &Self::BufferId,
         sub_range: Range<wgt::BufferAddress>,
@@ -1578,7 +1578,7 @@ impl crate::Context for Context {
         }
     }
 
-    fn buffer_unmap(&self, buffer: &Self::BufferId) {
+    unsafe fn buffer_unmap(&self, buffer: &Self::BufferId) {
         buffer.0.unmap();
     }
 
@@ -1642,19 +1642,19 @@ impl crate::Context for Context {
         // Dropped automatically
     }
 
-    fn buffer_destroy(&self, buffer: &Self::BufferId) {
+    unsafe fn buffer_destroy(&self, buffer: &Self::BufferId) {
         buffer.0.destroy();
     }
 
-    fn buffer_drop(&self, _buffer: &Self::BufferId) {
+    unsafe fn buffer_drop(&self, _buffer: &Self::BufferId) {
         // Dropped automatically
     }
 
-    fn texture_drop(&self, _texture: &Self::TextureId) {
+    unsafe fn texture_drop(&self, _texture: &Self::TextureId) {
         // Dropped automatically
     }
 
-    fn texture_destroy(&self, texture: &Self::TextureId) {
+    unsafe fn texture_destroy(&self, texture: &Self::TextureId) {
         texture.0.destroy();
     }
 
@@ -1967,7 +1967,7 @@ impl crate::Context for Context {
         })
     }
 
-    fn queue_write_buffer(
+    unsafe fn queue_write_buffer(
         &self,
         queue: &Self::QueueId,
         buffer: &Self::BufferId,
@@ -1994,7 +1994,7 @@ impl crate::Context for Context {
             );
     }
 
-    fn queue_write_texture(
+    unsafe fn queue_write_texture(
         &self,
         queue: &Self::QueueId,
         texture: crate::ImageCopyTexture,

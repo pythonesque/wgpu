@@ -12,6 +12,7 @@ mod macros;
 
 use std::{
     borrow::Cow,
+    cell::RefCell,
     error,
     fmt::{Debug, Display},
     future::Future,
@@ -22,7 +23,7 @@ use std::{
     thread,
 };
 
-use parking_lot::Mutex;
+// use parking_lot::Mutex;
 
 pub use wgt::{
     AdapterInfo, AddressMode, Backend, BackendBit, BindGroupLayoutEntry, BindingType,
@@ -152,7 +153,7 @@ trait RenderPassInner<Ctx: Context>: RenderInner<Ctx> {
     );
 }
 
-trait Context: Debug + Send + Sized + Sync {
+unsafe trait Context: Debug + Send + Sized + Sync {
     type AdapterId: Debug + Send + Sync + 'static;
     type DeviceId: Debug + Send + Sync + 'static;
     type QueueId: Debug + Send + Sync + 'static;
@@ -291,18 +292,18 @@ trait Context: Debug + Send + Sized + Sync {
         handler: impl UncapturedErrorHandler,
     );
 
-    fn buffer_map_async(
+    unsafe fn buffer_map_async(
         &self,
         buffer: &Self::BufferId,
         mode: MapMode,
         range: Range<BufferAddress>,
     ) -> Self::MapAsyncFuture;
-    fn buffer_get_mapped_range(
+    unsafe fn buffer_get_mapped_range(
         &self,
         buffer: &Self::BufferId,
         sub_range: Range<BufferAddress>,
     ) -> BufferMappedRange;
-    fn buffer_unmap(&self, buffer: &Self::BufferId);
+    unsafe fn buffer_unmap(&self, buffer: &Self::BufferId);
     fn swap_chain_get_current_texture_view(
         &self,
         swap_chain: &Self::SwapChainId,
@@ -320,10 +321,10 @@ trait Context: Debug + Send + Sized + Sync {
 
     fn surface_drop(&self, surface: &Self::SurfaceId);
     fn adapter_drop(&self, adapter: &Self::AdapterId);
-    fn buffer_destroy(&self, buffer: &Self::BufferId);
-    fn buffer_drop(&self, buffer: &Self::BufferId);
-    fn texture_destroy(&self, buffer: &Self::TextureId);
-    fn texture_drop(&self, texture: &Self::TextureId);
+    unsafe fn buffer_destroy(&self, buffer: &Self::BufferId);
+    unsafe fn buffer_drop(&self, buffer: &Self::BufferId);
+    unsafe fn texture_destroy(&self, buffer: &Self::TextureId);
+    unsafe fn texture_drop(&self, texture: &Self::TextureId);
     fn texture_view_drop(&self, texture_view: &Self::TextureViewId);
     fn sampler_drop(&self, sampler: &Self::SamplerId);
     fn query_set_drop(&self, query_set: &Self::QuerySetId);
@@ -440,14 +441,14 @@ trait Context: Debug + Send + Sized + Sync {
         encoder: Self::RenderBundleEncoderId,
         desc: &RenderBundleDescriptor,
     ) -> Self::RenderBundleId;
-    fn queue_write_buffer(
+    unsafe fn queue_write_buffer(
         &self,
         queue: &Self::QueueId,
         buffer: &Self::BufferId,
         offset: BufferAddress,
         data: &[u8],
     );
-    fn queue_write_texture(
+    unsafe fn queue_write_texture(
         &self,
         queue: &Self::QueueId,
         texture: ImageCopyTexture,
@@ -585,7 +586,7 @@ impl MapContext {
 pub struct Buffer {
     context: Arc<C>,
     id: <C as Context>::BufferId,
-    map_context: Mutex<MapContext>,
+    map_context: MapContext, /*>*/
     usage: BufferUsage,
 }
 
@@ -594,11 +595,12 @@ pub struct Buffer {
 /// Created by calling [`Buffer::slice`]. To use the whole buffer, call with unbounded slice:
 ///
 /// `buffer.slice(..)`
-#[derive(Copy, Clone, Debug)]
+#[derive(Debug)]
 pub struct BufferSlice<'a> {
-    buffer: &'a Buffer,
+    buffer: &'a mut Buffer,
     offset: BufferAddress,
     size: Option<BufferSize>,
+    map_context: core::cell::RefCell<MapContext>,
 }
 
 /// Handle to a texture on the GPU.
@@ -1626,7 +1628,7 @@ impl Device {
         Buffer {
             context: Arc::clone(&self.context),
             id: Context::device_create_buffer(&*self.context, &self.id, desc),
-            map_context: Mutex::new(map_context),
+            map_context: /*Mutex::new(*/map_context/*)*/,
             usage: desc.usage,
         }
     }
@@ -1783,14 +1785,14 @@ trait BufferMappedRangeSlice {
 /// Read only view into a mapped buffer.
 #[derive(Debug)]
 pub struct BufferView<'a> {
-    slice: BufferSlice<'a>,
+    slice: &'a BufferSlice<'a>,
     data: BufferMappedRange,
 }
 
 /// Write only view into mapped buffer.
 #[derive(Debug)]
 pub struct BufferViewMut<'a> {
-    slice: BufferSlice<'a>,
+    slice: &'a BufferSlice<'a>,
     data: BufferMappedRange,
     readable: bool,
 }
@@ -1837,9 +1839,8 @@ impl AsMut<[u8]> for BufferViewMut<'_> {
 impl Drop for BufferView<'_> {
     fn drop(&mut self) {
         self.slice
-            .buffer
             .map_context
-            .lock()
+            .borrow_mut()
             .remove(self.slice.offset, self.slice.size);
     }
 }
@@ -1847,9 +1848,8 @@ impl Drop for BufferView<'_> {
 impl Drop for BufferViewMut<'_> {
     fn drop(&mut self) {
         self.slice
-            .buffer
             .map_context
-            .lock()
+            .borrow_mut()
             .remove(self.slice.offset, self.slice.size);
     }
 }
@@ -1871,9 +1871,14 @@ impl Buffer {
 
     /// Use only a portion of this Buffer for a given operation. Choosing a range with no end
     /// will use the rest of the buffer. Using a totally unbounded range will use the entire buffer.
-    pub fn slice<S: RangeBounds<BufferAddress>>(&self, bounds: S) -> BufferSlice {
+    pub fn slice<S: RangeBounds<BufferAddress>>(&mut self, bounds: S) -> BufferSlice {
         let (offset, size) = range_to_offset_size(bounds);
         BufferSlice {
+            map_context: RefCell::new(MapContext {
+                total_size: self.map_context.total_size,
+                initial_range: self.map_context.initial_range.clone(),
+                sub_ranges: Vec::new(),
+            }),
             buffer: self,
             offset,
             size,
@@ -1881,14 +1886,23 @@ impl Buffer {
     }
 
     /// Flushes any pending write operations and unmaps the buffer from host memory.
-    pub fn unmap(&self) {
-        self.map_context.lock().reset();
-        Context::buffer_unmap(&*self.context, &self.id);
+    pub fn unmap(&mut self) {
+        let mc = &mut self.map_context;
+        mc.reset();
+        unsafe {
+            // Safety: synchronizes with any map or queue_write_buffer requests due
+            // to requiring &mut access.
+            Context::buffer_unmap(&*self.context, &self.id);
+        }
     }
 
     /// Destroy the associated native resources as soon as possible.
-    pub fn destroy(&self) {
-        Context::buffer_destroy(&*self.context, &self.id);
+    pub fn destroy(&mut self) {
+        unsafe {
+            // Safety: synchronizes with any calls to [Context::queue_write_buffer]
+            // on this buffer due to requiring &mut access.
+            Context::buffer_destroy(&*self.context, &self.id);
+        }
     }
 }
 
@@ -1904,10 +1918,10 @@ impl<'a> BufferSlice<'a> {
     /// It's expected that wgpu will eventually supply its own event loop infrastructure that will be easy to integrate
     /// into other event loops, like winit's.
     pub fn map_async(
-        &self,
+        &mut self,
         mode: MapMode,
     ) -> impl Future<Output = Result<(), BufferAsyncError>> + Send {
-        let mut mc = self.buffer.map_context.lock();
+        let mut mc = &mut self.buffer.map_context/*.lock()*/;
         assert_eq!(
             mc.initial_range,
             0..0,
@@ -1919,38 +1933,52 @@ impl<'a> BufferSlice<'a> {
             None => mc.total_size,
         };
         mc.initial_range = self.offset..end;
-
-        Context::buffer_map_async(
-            &*self.buffer.context,
-            &self.buffer.id,
-            mode,
-            self.offset..end,
-        )
+        unsafe {
+            // Safety: synchronizes with any unmap requests due to requiring &mut access.
+            Context::buffer_map_async(
+                &*self.buffer.context,
+                &self.buffer.id,
+                mode,
+                self.offset..end,
+            )
+        }
     }
 
     /// Synchronously and immediately map a buffer for reading. If the buffer is not immediately mappable
     /// through [`BufferDescriptor::mapped_at_creation`] or [`BufferSlice::map_async`], will panic.
-    pub fn get_mapped_range(&self) -> BufferView<'a> {
-        let end = self.buffer.map_context.lock().add(self.offset, self.size);
-        let data = Context::buffer_get_mapped_range(
-            &*self.buffer.context,
-            &self.buffer.id,
-            self.offset..end,
-        );
-        BufferView { slice: *self, data }
+    pub fn get_mapped_range<'b>(&'b self) -> BufferView<'b> {
+        let data = unsafe {
+            let mut guard = self.map_context.borrow_mut();
+            let end = guard.add(self.offset, self.size);
+            // Safety: The range was definitely previously unmapped, since the map_context lock is
+            // taken.  Additionally, it synchronizes with any calls to unmap, since unmapping
+            // requires &mut access to self.
+            Context::buffer_get_mapped_range(
+                &*self.buffer.context,
+                &self.buffer.id,
+                self.offset..end,
+            )
+        };
+        BufferView { slice: self, data }
     }
 
     /// Synchronously and immediately map a buffer for writing. If the buffer is not immediately mappable
     /// through [`BufferDescriptor::mapped_at_creation`] or [`BufferSlice::map_async`], will panic.
-    pub fn get_mapped_range_mut(&self) -> BufferViewMut<'a> {
-        let end = self.buffer.map_context.lock().add(self.offset, self.size);
-        let data = Context::buffer_get_mapped_range(
-            &*self.buffer.context,
-            &self.buffer.id,
-            self.offset..end,
-        );
+    pub fn get_mapped_range_mut<'b>(&'b self) -> BufferViewMut<'b> {
+        let data = unsafe {
+            let mut guard = self.map_context.borrow_mut();
+            let end = guard.add(self.offset, self.size);
+            // Safety: The range was definitely previously unmapped, since the map_context lock is
+            // taken.  Additionally, it synchronizes with any calls to unmap, since unmapping
+            // requires &mut access to self.
+            Context::buffer_get_mapped_range(
+                &*self.buffer.context,
+                &self.buffer.id,
+                self.offset..end,
+            )
+        };
         BufferViewMut {
-            slice: *self,
+            slice: self,
             data,
             readable: self.buffer.usage.contains(BufferUsage::MAP_READ),
         }
@@ -1960,7 +1988,11 @@ impl<'a> BufferSlice<'a> {
 impl Drop for Buffer {
     fn drop(&mut self) {
         if !thread::panicking() {
-            self.context.buffer_drop(&self.id);
+            unsafe {
+                // Safety: synchronizes with any calls to [Context::queue_write_buffer]
+                // on this buffer due to requiring &mut access.
+                self.context.buffer_drop(&self.id);
+            }
         }
     }
 }
@@ -1976,15 +2008,23 @@ impl Texture {
     }
 
     /// Destroy the associated native resources as soon as possible.
-    pub fn destroy(&self) {
-        Context::texture_destroy(&*self.context, &self.id);
+    pub fn destroy(&mut self) {
+        unsafe {
+            // Safety: synchronizes with any calls to [Context::queue_write_texture]
+            // on this texture due to requiring &mut access.
+            Context::texture_destroy(&*self.context, &self.id);
+        }
     }
 }
 
 impl Drop for Texture {
     fn drop(&mut self) {
         if self.owned && !thread::panicking() {
-            self.context.texture_drop(&self.id);
+            unsafe {
+                // Safety: synchronizes with any calls to [Context::queue_write_texture]
+                // on this texture due to requiring &mut access.
+                self.context.texture_drop(&self.id);
+            }
         }
     }
 }
@@ -2906,7 +2946,12 @@ impl Queue {
     /// As such, the write is not immediately submitted, and instead enqueued
     /// internally to happen at the start of the next `submit()` call.
     pub fn write_buffer(&self, buffer: &Buffer, offset: BufferAddress, data: &[u8]) {
-        Context::queue_write_buffer(&*self.context, &self.id, &buffer.id, offset, data)
+        unsafe {
+            // Safety: synchronizes with any calls to [Context::buffer_destroy],
+            // [Context::buffer_unmap], or [Context::buffer_drop] on this buffer due to requiring
+            // & access where they require &mut access.
+            Context::queue_write_buffer(&*self.context, &self.id, &buffer.id, offset, data)
+        }
     }
 
     /// Schedule a data write into `texture`.
@@ -2921,7 +2966,12 @@ impl Queue {
         data_layout: ImageDataLayout,
         size: Extent3d,
     ) {
-        Context::queue_write_texture(&*self.context, &self.id, texture, data, data_layout, size)
+        unsafe {
+            // Safety: synchronizes with any calls to [Context::texture_destroy] or
+            // [Context::texture_drop] on this buffer due to requiring & access where they require
+            // &mut access.
+            Context::queue_write_texture(&*self.context, &self.id, texture, data, data_layout, size)
+        }
     }
 
     /// Submits a series of finished command buffers for execution.

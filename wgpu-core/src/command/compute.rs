@@ -266,6 +266,8 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let hub = B::hub(self);
         let mut token = Token::root();
 
+        let (buffer_guard, mut token) = hub.buffers.read(&mut token);
+        let (texture_guard, mut token) = hub.textures.read(&mut token);
         let (mut cmd_buf_guard, mut token) = hub.command_buffers.write(&mut token);
         let cmd_buf =
             CommandBuffer::get_encoder_mut(&mut *cmd_buf_guard, encoder_id).map_pass_err(scope)?;
@@ -297,13 +299,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             }
         }
 
-        let (_, mut token) = hub.render_bundles.read(&mut token);
         let (pipeline_layout_guard, mut token) = hub.pipeline_layouts.read(&mut token);
         let (bind_group_guard, mut token) = hub.bind_groups.read(&mut token);
         let (pipeline_guard, mut token) = hub.compute_pipelines.read(&mut token);
-        let (query_set_guard, mut token) = hub.query_sets.read(&mut token);
-        let (buffer_guard, mut token) = hub.buffers.read(&mut token);
-        let (texture_guard, _) = hub.textures.read(&mut token);
+        let (query_set_guard, _) = hub.query_sets.read(&mut token);
 
         let mut state = State {
             binder: Binder::new(),
@@ -539,7 +538,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
                     let &(ref buf_raw, _) = indirect_buffer
                         .raw
-                        .as_ref()
+                        .as_deref()
                         .ok_or(ComputePassErrorInner::InvalidIndirectBuffer(buffer_id))
                         .map_pass_err(scope)?;
 

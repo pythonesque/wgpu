@@ -100,7 +100,7 @@ impl RefCount {
     const MAX: usize = 1 << 24;
 
     fn load(&self) -> usize {
-        unsafe { self.0.as_ref() }.load(Ordering::Acquire)
+        unsafe { self.0.as_ref() }.load(Ordering::Relaxed)
     }
 
     /// This works like `std::mem::drop`, except that it returns a boolean which is true if and only
@@ -219,7 +219,7 @@ impl LifeGuard {
 
     /// Returns `true` if the resource is still needed by the user.
     fn use_at(&self, submit_index: SubmissionIndex) -> bool {
-        self.submission_index.store(submit_index, Ordering::Release);
+        self.submission_index.store(submit_index, Ordering::Relaxed);
         self.ref_count.is_some()
     }
 }

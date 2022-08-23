@@ -79,10 +79,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         let hub = B::hub(self);
         let mut token = Token::root();
-        let (mut cmd_buf_guard, mut token) = hub.command_buffers.write(&mut token);
+        let (buffer_guard, mut token) = hub.buffers.read(&mut token);
+        let (mut cmd_buf_guard, _) = hub.command_buffers.write(&mut token);
         let cmd_buf = CommandBuffer::get_encoder_mut(&mut *cmd_buf_guard, command_encoder_id)
             .map_err(|_| ClearError::InvalidCommandEncoder(command_encoder_id))?;
-        let (buffer_guard, _) = hub.buffers.read(&mut token);
 
         #[cfg(feature = "trace")]
         if let Some(ref mut list) = cmd_buf.commands {
@@ -100,7 +100,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .map_err(ClearError::InvalidBuffer)?;
         let &(ref dst_raw, _) = dst_buffer
             .raw
-            .as_ref()
+            .as_deref()
             .ok_or(ClearError::InvalidBuffer(dst))?;
         if !dst_buffer.usage.contains(BufferUsage::COPY_DST) {
             return Err(ClearError::MissingCopyDstUsageFlag(Some(dst), None));
@@ -143,9 +143,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         );
 
         // actual hal barrier & operation
-        let dst_barrier = dst_pending
-            .map(|pending| pending.into_hal(dst_buffer))
-            .next();
+        let dst_barrier = dst_pending.map(|pending| pending.into_hal(dst_raw)).next();
         let cmd_buf_raw = cmd_buf.raw.last_mut().unwrap();
         unsafe {
             cmd_buf_raw.pipeline_barrier(
@@ -175,11 +173,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         let hub = B::hub(self);
         let mut token = Token::root();
-        let (mut cmd_buf_guard, mut token) = hub.command_buffers.write(&mut token);
+        let (texture_guard, mut token) = hub.textures.read(&mut token);
+        let (mut cmd_buf_guard, _) = hub.command_buffers.write(&mut token);
         let cmd_buf = CommandBuffer::get_encoder_mut(&mut *cmd_buf_guard, command_encoder_id)
             .map_err(|_| ClearError::InvalidCommandEncoder(command_encoder_id))?;
-        let (_, mut token) = hub.buffers.read(&mut token); // skip token
-        let (texture_guard, _) = hub.textures.read(&mut token);
 
         #[cfg(feature = "trace")]
         if let Some(ref mut list) = cmd_buf.commands {
@@ -256,7 +253,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .map_err(ClearError::InvalidTexture)?;
         let &(ref dst_raw, _) = dst_texture
             .raw
-            .as_ref()
+            .as_deref()
             .ok_or(ClearError::InvalidTexture(dst))?;
         if !dst_texture.usage.contains(TextureUsage::COPY_DST) {
             return Err(ClearError::MissingCopyDstUsageFlag(None, Some(dst)));
@@ -264,7 +261,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         // actual hal barrier & operation
         let dst_barrier = dst_pending
-            .map(|pending| pending.into_hal(dst_texture))
+            .map(|pending| pending.into_hal(dst_raw, dst_texture.aspects))
             .next();
         let cmd_buf_raw = cmd_buf.raw.last_mut().unwrap();
         unsafe {

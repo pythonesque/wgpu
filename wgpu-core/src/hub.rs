@@ -6,7 +6,7 @@ use crate::{
     backend,
     binding_model::{BindGroup, BindGroupLayout, PipelineLayout},
     command::{CommandBuffer, RenderBundle},
-    device::Device,
+    device::{Device, LifetimeTracker, QueueInner, SuspectedResources, Trackers},
     id::{
         AdapterId, BindGroupId, BindGroupLayoutId, BufferId, CommandBufferId, ComputePipelineId,
         DeviceId, PipelineLayoutId, RenderBundleId, RenderPipelineId, SamplerId, ShaderModuleId,
@@ -19,10 +19,10 @@ use crate::{
     Epoch, Index,
 };
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use wgt::Backend;
 
-use self::rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+pub use self::rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::id::QuerySetId;
 use crate::resource::QuerySet;
 #[cfg(debug_assertions)]
@@ -284,60 +284,96 @@ pub trait Access<B> {}
 pub enum Root {}
 //TODO: establish an order instead of declaring all the pairs.
 impl Access<Instance> for Root {}
+impl Access<SuspectedResources> for Root {}
 impl Access<Surface> for Root {}
 impl Access<Surface> for Instance {}
 impl<B: hal::Backend> Access<Adapter<B>> for Root {}
 impl<B: hal::Backend> Access<Adapter<B>> for Surface {}
+impl<B: hal::Backend> Access<Device<B>> for SuspectedResources {}
 impl<B: hal::Backend> Access<Device<B>> for Root {}
 impl<B: hal::Backend> Access<Device<B>> for Surface {}
 impl<B: hal::Backend> Access<Device<B>> for Adapter<B> {}
+impl<B: hal::Backend> Access<SwapChain<B>> for SuspectedResources {}
 impl<B: hal::Backend> Access<SwapChain<B>> for Root {}
 impl<B: hal::Backend> Access<SwapChain<B>> for Device<B> {}
-impl<B: hal::Backend> Access<PipelineLayout<B>> for Root {}
-impl<B: hal::Backend> Access<PipelineLayout<B>> for Device<B> {}
-impl<B: hal::Backend> Access<PipelineLayout<B>> for RenderBundle {}
 impl<B: hal::Backend> Access<BindGroupLayout<B>> for Root {}
 impl<B: hal::Backend> Access<BindGroupLayout<B>> for Device<B> {}
-impl<B: hal::Backend> Access<BindGroupLayout<B>> for PipelineLayout<B> {}
-impl<B: hal::Backend> Access<BindGroup<B>> for Root {}
-impl<B: hal::Backend> Access<BindGroup<B>> for Device<B> {}
-impl<B: hal::Backend> Access<BindGroup<B>> for BindGroupLayout<B> {}
-impl<B: hal::Backend> Access<BindGroup<B>> for PipelineLayout<B> {}
-impl<B: hal::Backend> Access<BindGroup<B>> for CommandBuffer<B> {}
+impl<B: hal::Backend> Access<BindGroupLayout<B>> for SwapChain<B> {}
+impl<B: hal::Backend> Access<Buffer<B>> for Root {}
+impl<B: hal::Backend> Access<Buffer<B>> for SuspectedResources {}
+impl<B: hal::Backend> Access<Buffer<B>> for Device<B> {}
+impl<B: hal::Backend> Access<Buffer<B>> for BindGroupLayout<B> {}
+impl<B: hal::Backend> Access<Texture<B>> for Root {}
+impl<B: hal::Backend> Access<Texture<B>> for Device<B> {}
+impl<B: hal::Backend> Access<Texture<B>> for Buffer<B> {}
+impl Access<Trackers /*<B>*/> for Root {}
+impl<B: hal::Backend> Access<Trackers /*<B>*/> for Device<B> {}
+impl<B: hal::Backend> Access<Trackers /*<B>*/> for BindGroupLayout<B> {}
+impl<B: hal::Backend> Access<Trackers /*<B>*/> for Buffer<B> {}
+impl<B: hal::Backend> Access<Trackers /*<B>*/> for Texture<B> {}
+impl<B: hal::Backend> Access<QueueInner<B>> for Root {}
+impl<B: hal::Backend> Access<QueueInner<B>> for Surface {}
+impl<B: hal::Backend> Access<QueueInner<B>> for Device<B> {}
+impl<B: hal::Backend> Access<QueueInner<B>> for SwapChain<B> {}
+impl<B: hal::Backend> Access<QueueInner<B>> for Buffer<B> {}
+impl<B: hal::Backend> Access<QueueInner<B>> for Texture<B> {}
+impl<B: hal::Backend> Access<QueueInner<B>> for Trackers /*<B>*/ {}
+impl<B: hal::Backend> Access<LifetimeTracker<B>> for SuspectedResources {}
+impl<B: hal::Backend> Access<LifetimeTracker<B>> for Root {}
+impl<B: hal::Backend> Access<LifetimeTracker<B>> for Device<B> {}
+impl<B: hal::Backend> Access<LifetimeTracker<B>> for Trackers /*<B>*/ {}
+impl<B: hal::Backend> Access<LifetimeTracker<B>> for QueueInner<B> {}
 impl<B: hal::Backend> Access<CommandBuffer<B>> for Root {}
 impl<B: hal::Backend> Access<CommandBuffer<B>> for Device<B> {}
 impl<B: hal::Backend> Access<CommandBuffer<B>> for SwapChain<B> {}
+impl<B: hal::Backend> Access<CommandBuffer<B>> for Buffer<B> {}
+impl<B: hal::Backend> Access<CommandBuffer<B>> for Texture<B> {}
+impl<B: hal::Backend> Access<CommandBuffer<B>> for QueueInner<B> {} //TODO: remove this (only used in `submit()`)
 impl<B: hal::Backend> Access<RenderBundle> for Device<B> {}
+impl<B: hal::Backend> Access<RenderBundle> for LifetimeTracker<B> {}
 impl<B: hal::Backend> Access<RenderBundle> for CommandBuffer<B> {}
+impl<B: hal::Backend> Access<PipelineLayout<B>> for Root {}
+impl<B: hal::Backend> Access<PipelineLayout<B>> for Device<B> {}
+impl<B: hal::Backend> Access<PipelineLayout<B>> for BindGroupLayout<B> {}
+impl<B: hal::Backend> Access<PipelineLayout<B>> for Buffer<B> {}
+impl<B: hal::Backend> Access<PipelineLayout<B>> for LifetimeTracker<B> {}
+impl<B: hal::Backend> Access<PipelineLayout<B>> for CommandBuffer<B> {}
+impl<B: hal::Backend> Access<PipelineLayout<B>> for RenderBundle {}
+impl<B: hal::Backend> Access<BindGroup<B>> for SuspectedResources {}
+impl<B: hal::Backend> Access<BindGroup<B>> for Root {}
+impl<B: hal::Backend> Access<BindGroup<B>> for Device<B> {}
+impl<B: hal::Backend> Access<BindGroup<B>> for SwapChain<B> {}
+impl<B: hal::Backend> Access<BindGroup<B>> for BindGroupLayout<B> {}
+impl<B: hal::Backend> Access<BindGroup<B>> for Texture<B> {}
+impl<B: hal::Backend> Access<BindGroup<B>> for LifetimeTracker<B> {}
+impl<B: hal::Backend> Access<BindGroup<B>> for CommandBuffer<B> {}
+impl<B: hal::Backend> Access<BindGroup<B>> for PipelineLayout<B> {}
 impl<B: hal::Backend> Access<ComputePipeline<B>> for Device<B> {}
+impl<B: hal::Backend> Access<ComputePipeline<B>> for LifetimeTracker<B> {}
 impl<B: hal::Backend> Access<ComputePipeline<B>> for BindGroup<B> {}
 impl<B: hal::Backend> Access<RenderPipeline<B>> for Device<B> {}
+impl<B: hal::Backend> Access<RenderPipeline<B>> for LifetimeTracker<B> {}
 impl<B: hal::Backend> Access<RenderPipeline<B>> for BindGroup<B> {}
 impl<B: hal::Backend> Access<RenderPipeline<B>> for ComputePipeline<B> {}
 impl<B: hal::Backend> Access<QuerySet<B>> for Root {}
 impl<B: hal::Backend> Access<QuerySet<B>> for Device<B> {}
+impl<B: hal::Backend> Access<QuerySet<B>> for LifetimeTracker<B> {}
 impl<B: hal::Backend> Access<QuerySet<B>> for CommandBuffer<B> {}
-impl<B: hal::Backend> Access<QuerySet<B>> for RenderPipeline<B> {}
 impl<B: hal::Backend> Access<QuerySet<B>> for ComputePipeline<B> {}
+impl<B: hal::Backend> Access<QuerySet<B>> for RenderPipeline<B> {}
 impl<B: hal::Backend> Access<ShaderModule<B>> for Device<B> {}
 impl<B: hal::Backend> Access<ShaderModule<B>> for BindGroupLayout<B> {}
-impl<B: hal::Backend> Access<Buffer<B>> for Root {}
-impl<B: hal::Backend> Access<Buffer<B>> for Device<B> {}
-impl<B: hal::Backend> Access<Buffer<B>> for BindGroupLayout<B> {}
-impl<B: hal::Backend> Access<Buffer<B>> for BindGroup<B> {}
-impl<B: hal::Backend> Access<Buffer<B>> for CommandBuffer<B> {}
-impl<B: hal::Backend> Access<Buffer<B>> for ComputePipeline<B> {}
-impl<B: hal::Backend> Access<Buffer<B>> for RenderPipeline<B> {}
-impl<B: hal::Backend> Access<Buffer<B>> for QuerySet<B> {}
-impl<B: hal::Backend> Access<Texture<B>> for Root {}
-impl<B: hal::Backend> Access<Texture<B>> for Device<B> {}
-impl<B: hal::Backend> Access<Texture<B>> for Buffer<B> {}
+impl<B: hal::Backend> Access<ShaderModule<B>> for PipelineLayout<B> {}
 impl<B: hal::Backend> Access<TextureView<B>> for Root {}
-impl<B: hal::Backend> Access<TextureView<B>> for SwapChain<B> {}
 impl<B: hal::Backend> Access<TextureView<B>> for Device<B> {}
+impl<B: hal::Backend> Access<TextureView<B>> for SwapChain<B> {}
 impl<B: hal::Backend> Access<TextureView<B>> for Texture<B> {}
+impl<B: hal::Backend> Access<TextureView<B>> for LifetimeTracker<B> {}
+impl<B: hal::Backend> Access<TextureView<B>> for RenderPipeline<B> {}
+impl<B: hal::Backend> Access<TextureView<B>> for QuerySet<B> {}
 impl<B: hal::Backend> Access<Sampler<B>> for Root {}
 impl<B: hal::Backend> Access<Sampler<B>> for Device<B> {}
+impl<B: hal::Backend> Access<Sampler<B>> for LifetimeTracker<B> {}
 impl<B: hal::Backend> Access<Sampler<B>> for TextureView<B> {}
 
 #[cfg(debug_assertions)]
@@ -363,6 +399,31 @@ impl<'a, T> Token<'a, T> {
             active.set(old + 1);
         });
         Self { level: PhantomData }
+    }
+}
+
+impl<'a, T> Token<'a, T> {
+    pub(crate) fn advance<'b, A>(&'b mut self) -> Token<'b, A>
+    where
+        T: Access<A>,
+    {
+        #[cfg(debug_assertions)]
+        ACTIVE_TOKEN.with(|active| {
+            let old = active.get();
+            assert_ne!(old, 0, "Root token was dropped");
+            active.set(old + 1);
+        });
+        Token { level: PhantomData }
+    }
+
+    pub(crate) fn lock<'b, A>(
+        &'b mut self,
+        mutex: &'b Mutex<A>,
+    ) -> (MutexGuard<'b, A>, Token<'b, A>)
+    where
+        T: Access<A>,
+    {
+        (mutex.lock(), self.advance())
     }
 }
 
@@ -583,6 +644,7 @@ impl<T: Resource, I: TypedId + Copy, F: IdentityHandlerFactory<I>> Registry<T, I
 
 #[derive(Debug)]
 pub struct Hub<B: hal::Backend, F: GlobalIdentityHandlerFactory> {
+    pub(crate) temp_suspected: Mutex<SuspectedResources /*<B>*/>,
     pub adapters: Registry<Adapter<B>, AdapterId, F>,
     pub devices: Registry<Device<B>, DeviceId, F>,
     pub swap_chains: Registry<SwapChain<B>, SwapChainId, F>,
@@ -604,6 +666,7 @@ pub struct Hub<B: hal::Backend, F: GlobalIdentityHandlerFactory> {
 impl<B: GfxBackend, F: GlobalIdentityHandlerFactory> Hub<B, F> {
     fn new(factory: &F) -> Self {
         Self {
+            temp_suspected: Mutex::new(SuspectedResources::default()),
             adapters: Registry::new(B::VARIANT, factory),
             devices: Registry::new(B::VARIANT, factory),
             swap_chains: Registry::new(B::VARIANT, factory),

@@ -342,9 +342,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let hub = B::hub(self);
         let mut token = Token::root();
 
-        let (mut cmd_buf_guard, mut token) = hub.command_buffers.write(&mut token);
+        let (buffer_guard, mut token) = hub.buffers.read(&mut token);
+        let (mut cmd_buf_guard, _) = hub.command_buffers.write(&mut token);
         let cmd_buf = CommandBuffer::get_encoder_mut(&mut *cmd_buf_guard, command_encoder_id)?;
-        let (buffer_guard, _) = hub.buffers.read(&mut token);
 
         #[cfg(feature = "trace")]
         if let Some(ref mut list) = cmd_buf.commands {
@@ -364,15 +364,13 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .map_err(TransferError::InvalidBuffer)?;
         let &(ref src_raw, _) = src_buffer
             .raw
-            .as_ref()
+            .as_deref()
             .ok_or(TransferError::InvalidBuffer(source))?;
         if !src_buffer.usage.contains(BufferUsage::COPY_SRC) {
             return Err(TransferError::MissingCopySrcUsageFlag.into());
         }
         // expecting only a single barrier
-        let src_barrier = src_pending
-            .map(|pending| pending.into_hal(src_buffer))
-            .next();
+        let src_barrier = src_pending.map(|pending| pending.into_hal(src_raw)).next();
 
         let (dst_buffer, dst_pending) = cmd_buf
             .trackers
@@ -381,14 +379,12 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .map_err(TransferError::InvalidBuffer)?;
         let &(ref dst_raw, _) = dst_buffer
             .raw
-            .as_ref()
+            .as_deref()
             .ok_or(TransferError::InvalidBuffer(destination))?;
         if !dst_buffer.usage.contains(BufferUsage::COPY_DST) {
             return Err(TransferError::MissingCopyDstUsageFlag(Some(destination), None).into());
         }
-        let dst_barrier = dst_pending
-            .map(|pending| pending.into_hal(dst_buffer))
-            .next();
+        let dst_barrier = dst_pending.map(|pending| pending.into_hal(dst_raw)).next();
 
         if size % wgt::COPY_BUFFER_ALIGNMENT != 0 {
             return Err(TransferError::UnalignedCopySize(size).into());
@@ -476,10 +472,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         let hub = B::hub(self);
         let mut token = Token::root();
-        let (mut cmd_buf_guard, mut token) = hub.command_buffers.write(&mut token);
-        let cmd_buf = CommandBuffer::get_encoder_mut(&mut *cmd_buf_guard, command_encoder_id)?;
         let (buffer_guard, mut token) = hub.buffers.read(&mut token);
-        let (texture_guard, _) = hub.textures.read(&mut token);
+        let (texture_guard, mut token) = hub.textures.read(&mut token);
+        let (mut cmd_buf_guard, _) = hub.command_buffers.write(&mut token);
+        let cmd_buf = CommandBuffer::get_encoder_mut(&mut *cmd_buf_guard, command_encoder_id)?;
         let (dst_layers, dst_selector, dst_offset) =
             texture_copy_view_to_hal(destination, copy_size, &*texture_guard)?;
 
@@ -504,12 +500,12 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .map_err(TransferError::InvalidBuffer)?;
         let &(ref src_raw, _) = src_buffer
             .raw
-            .as_ref()
+            .as_deref()
             .ok_or(TransferError::InvalidBuffer(source.buffer))?;
         if !src_buffer.usage.contains(BufferUsage::COPY_SRC) {
             return Err(TransferError::MissingCopySrcUsageFlag.into());
         }
-        let src_barriers = src_pending.map(|pending| pending.into_hal(src_buffer));
+        let src_barriers = src_pending.map(|pending| pending.into_hal(src_raw));
 
         let (dst_texture, dst_pending) = cmd_buf
             .trackers
@@ -523,14 +519,15 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .unwrap();
         let &(ref dst_raw, _) = dst_texture
             .raw
-            .as_ref()
+            .as_deref()
             .ok_or(TransferError::InvalidTexture(destination.texture))?;
         if !dst_texture.usage.contains(TextureUsage::COPY_DST) {
             return Err(
                 TransferError::MissingCopyDstUsageFlag(None, Some(destination.texture)).into(),
             );
         }
-        let dst_barriers = dst_pending.map(|pending| pending.into_hal(dst_texture));
+        let dst_barriers =
+            dst_pending.map(|pending| pending.into_hal(dst_raw, dst_texture.aspects));
 
         let bytes_per_block = conv::map_texture_format(dst_texture.format, cmd_buf.private_features)
             .surface_desc()
@@ -626,10 +623,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         let hub = B::hub(self);
         let mut token = Token::root();
-        let (mut cmd_buf_guard, mut token) = hub.command_buffers.write(&mut token);
-        let cmd_buf = CommandBuffer::get_encoder_mut(&mut *cmd_buf_guard, command_encoder_id)?;
         let (buffer_guard, mut token) = hub.buffers.read(&mut token);
-        let (texture_guard, _) = hub.textures.read(&mut token);
+        let (texture_guard, mut token) = hub.textures.read(&mut token);
+        let (mut cmd_buf_guard, _) = hub.command_buffers.write(&mut token);
+        let cmd_buf = CommandBuffer::get_encoder_mut(&mut *cmd_buf_guard, command_encoder_id)?;
         let (src_layers, src_selector, src_offset) =
             texture_copy_view_to_hal(source, copy_size, &*texture_guard)?;
 
@@ -659,12 +656,13 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .unwrap();
         let &(ref src_raw, _) = src_texture
             .raw
-            .as_ref()
+            .as_deref()
             .ok_or(TransferError::InvalidTexture(source.texture))?;
         if !src_texture.usage.contains(TextureUsage::COPY_SRC) {
             return Err(TransferError::MissingCopySrcUsageFlag.into());
         }
-        let src_barriers = src_pending.map(|pending| pending.into_hal(src_texture));
+        let src_barriers =
+            src_pending.map(|pending| pending.into_hal(src_raw, src_texture.aspects));
 
         let (dst_buffer, dst_barriers) = cmd_buf
             .trackers
@@ -673,14 +671,14 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .map_err(TransferError::InvalidBuffer)?;
         let &(ref dst_raw, _) = dst_buffer
             .raw
-            .as_ref()
+            .as_deref()
             .ok_or(TransferError::InvalidBuffer(destination.buffer))?;
         if !dst_buffer.usage.contains(BufferUsage::COPY_DST) {
             return Err(
                 TransferError::MissingCopyDstUsageFlag(Some(destination.buffer), None).into(),
             );
         }
-        let dst_barrier = dst_barriers.map(|pending| pending.into_hal(dst_buffer));
+        let dst_barrier = dst_barriers.map(|pending| pending.into_hal(dst_raw));
 
         let bytes_per_block = conv::map_texture_format(src_texture.format, cmd_buf.private_features)
             .surface_desc()
@@ -780,10 +778,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let hub = B::hub(self);
         let mut token = Token::root();
 
-        let (mut cmd_buf_guard, mut token) = hub.command_buffers.write(&mut token);
+        let (texture_guard, mut token) = hub.textures.read(&mut token);
+        let (mut cmd_buf_guard, _) = hub.command_buffers.write(&mut token);
         let cmd_buf = CommandBuffer::get_encoder_mut(&mut *cmd_buf_guard, command_encoder_id)?;
-        let (_, mut token) = hub.buffers.read(&mut token); // skip token
-        let (texture_guard, _) = hub.textures.read(&mut token);
         let (src_layers, src_selector, src_offset) =
             texture_copy_view_to_hal(source, copy_size, &*texture_guard)?;
         let (dst_layers, dst_selector, dst_offset) =
@@ -818,7 +815,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .unwrap();
         let &(ref src_raw, _) = src_texture
             .raw
-            .as_ref()
+            .as_deref()
             .ok_or(TransferError::InvalidTexture(source.texture))?;
         if !src_texture.usage.contains(TextureUsage::COPY_SRC) {
             return Err(TransferError::MissingCopySrcUsageFlag.into());
@@ -826,7 +823,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         //TODO: try to avoid this the collection. It's needed because both
         // `src_pending` and `dst_pending` try to hold `trackers.textures` mutably.
         let mut barriers = src_pending
-            .map(|pending| pending.into_hal(src_texture))
+            .map(|pending| pending.into_hal(src_raw, src_texture.aspects))
             .collect::<Vec<_>>();
 
         let (dst_texture, dst_pending) = cmd_buf
@@ -841,14 +838,14 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .unwrap();
         let &(ref dst_raw, _) = dst_texture
             .raw
-            .as_ref()
+            .as_deref()
             .ok_or(TransferError::InvalidTexture(destination.texture))?;
         if !dst_texture.usage.contains(TextureUsage::COPY_DST) {
             return Err(
                 TransferError::MissingCopyDstUsageFlag(None, Some(destination.texture)).into(),
             );
         }
-        barriers.extend(dst_pending.map(|pending| pending.into_hal(dst_texture)));
+        barriers.extend(dst_pending.map(|pending| pending.into_hal(dst_raw, dst_texture.aspects)));
 
         validate_texture_copy_range(
             source,

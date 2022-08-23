@@ -103,11 +103,13 @@ impl<B: GfxBackend> CommandBuffer<B> {
 
         let buffer_barriers = base.buffers.merge_replace(head_buffers).map(|pending| {
             let buf = &buffer_guard[pending.id];
-            pending.into_hal(buf)
+            let &(ref buf_raw, _) = buf.raw.as_deref().expect("Buffer is destroyed");
+            pending.into_hal(buf_raw)
         });
         let texture_barriers = base.textures.merge_replace(head_textures).map(|pending| {
             let tex = &texture_guard[pending.id];
-            pending.into_hal(tex)
+            let &(ref tex_raw, _) = tex.raw.as_deref().expect("Texture is destroyed");
+            pending.into_hal(tex_raw, tex.aspects)
         });
 
         //TODO: be more deliberate about the stages

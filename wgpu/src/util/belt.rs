@@ -1,6 +1,6 @@
 use crate::{
-    Buffer, BufferAddress, BufferDescriptor, BufferSize, BufferUsage, BufferViewMut,
-    CommandEncoder, Device, MapMode,
+    Buffer, BufferAddress, BufferDescriptor, BufferSize, BufferSlice, BufferUsage, CommandEncoder,
+    Device, MapMode,
 };
 use std::pin::Pin;
 use std::task::{self, Poll};
@@ -97,7 +97,7 @@ impl StagingBelt {
         offset: BufferAddress,
         size: BufferSize,
         device: &Device,
-    ) -> BufferViewMut {
+    ) -> BufferSlice {
         let mut chunk = if let Some(index) = self
             .active_chunks
             .iter()
@@ -134,11 +134,10 @@ impl StagingBelt {
 
         self.active_chunks.push(chunk);
         self.active_chunks
-            .last()
+            .last_mut()
             .unwrap()
             .buffer
             .slice(old_offset..old_offset + size.get())
-            .get_mapped_range_mut()
     }
 
     /// Prepare currently mapped buffers for use in a submission.
@@ -146,7 +145,7 @@ impl StagingBelt {
     /// At this point, all the partially used staging buffers are closed until
     /// the GPU is done copying the data from them.
     pub fn finish(&mut self) {
-        for chunk in self.active_chunks.drain(..) {
+        for mut chunk in self.active_chunks.drain(..) {
             chunk.buffer.unmap();
             self.closed_chunks.push(chunk);
         }
@@ -165,7 +164,7 @@ impl StagingBelt {
         let futures = self
             .closed_chunks
             .drain(..)
-            .map(|chunk| {
+            .map(|mut chunk| {
                 let sender = sender.clone();
                 let async_buffer = chunk.buffer.slice(..).map_async(MapMode::Write);
 

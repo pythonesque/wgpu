@@ -251,12 +251,12 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let surface = surface_guard
             .get_mut(swap_chain_id.to_surface_id())
             .map_err(|_| SwapChainError::InvalidSurface)?;
-        let (mut device_guard, mut token) = hub.devices.write(&mut token);
+        let (device_guard, mut token) = hub.devices.read(&mut token);
         let (mut swap_chain_guard, mut token) = hub.swap_chains.write(&mut token);
         let sc = swap_chain_guard
             .get_mut(swap_chain_id)
             .map_err(|_| SwapChainError::Invalid)?;
-        let device = &mut device_guard[sc.device_id.value];
+        let device = &device_guard[sc.device_id.value];
 
         #[cfg(feature = "trace")]
         if let Some(ref trace) = device.trace {
@@ -284,7 +284,8 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         } else {
             None
         };
-        let queue = &mut device.queue_group.queues[0];
+        let (mut queue_inner_guard, _) = token.lock(&device.queue);
+        let queue = &mut queue_inner_guard.raw.queues[0];
         let result = unsafe { queue.present(B::get_surface_mut(surface), image, sem) };
 
         log::debug!("Presented. End of Frame");

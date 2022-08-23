@@ -64,14 +64,20 @@ impl DownloadBuffer {
     pub fn read_buffer(
         device: &super::Device,
         queue: &super::Queue,
-        buffer: &super::BufferSlice,
+        buffer: &mut super::BufferSlice,
     ) -> impl Future<Output = Result<Self, super::BufferAsyncError>> + Send {
         let size = match buffer.size {
             Some(size) => size.into(),
-            None => buffer.buffer.map_context.lock().total_size - buffer.offset,
+            None => {
+                buffer
+                    .buffer
+                    .map_context /*.lock()*/
+                    .total_size
+                    - buffer.offset
+            }
         };
 
-        let download = device.create_buffer(&super::BufferDescriptor {
+        let mut download = device.create_buffer(&super::BufferDescriptor {
             size,
             usage: super::BufferUsage::COPY_DST | super::BufferUsage::MAP_READ,
             mapped_at_creation: false,
@@ -87,8 +93,11 @@ impl DownloadBuffer {
         let fut = download.slice(..).map_async(super::MapMode::Read);
         async move {
             fut.await?;
-            let mapped_range =
-                super::Context::buffer_get_mapped_range(&*download.context, &download.id, 0..size);
+            let mapped_range = unsafe {
+                // Safety: this is the first time download is exposed, so there can't have been an
+                // unmap yet, nor can it have had its range mapped.
+                super::Context::buffer_get_mapped_range(&*download.context, &download.id, 0..size)
+            };
             Ok(Self(download, mapped_range))
         }
     }

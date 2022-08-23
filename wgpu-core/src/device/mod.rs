@@ -6,7 +6,8 @@ use crate::{
     binding_model, command, conv,
     device::life::WaitIdleError,
     hub::{
-        GfxBackend, Global, GlobalIdentityHandlerFactory, Hub, Input, InvalidId, Storage, Token,
+        GfxBackend, Global, GlobalIdentityHandlerFactory, Hub, Input, InvalidId, RwLockWriteGuard,
+        Storage, Token,
     },
     id, instance,
     memory_init_tracker::{MemoryInitKind, MemoryInitTracker, MemoryInitTrackerAction},
@@ -57,6 +58,10 @@ pub const SHADER_STAGE_COUNT: usize = 3;
 const IMPLICIT_FAILURE: &str = "failed implicit";
 
 pub type DeviceDescriptor<'a> = wgt::DeviceDescriptor<Label<'a>>;
+
+pub(crate) type LifetimeTracker<B> = life::LifetimeTracker<B>;
+pub(crate) type SuspectedResources = life::SuspectedResources;
+pub(crate) type Trackers /*<B>*/ = TrackerSet;
 
 pub fn all_buffer_stages() -> hal::pso::PipelineStage {
     use hal::pso::PipelineStage as Ps;
@@ -180,10 +185,13 @@ fn map_buffer<B: hal::Backend>(
     size: BufferAddress,
     kind: HostMap,
 ) -> Result<ptr::NonNull<u8>, resource::BufferAccessError> {
-    let &mut (_, ref mut block) = buffer
+    // NOTE: We do *not* dereference the actual B::Buffer mutably, as it may be shared when we call
+    // this.
+    let block = &mut buffer
         .raw
-        .as_mut()
-        .ok_or(resource::BufferAccessError::Destroyed)?;
+        .as_deref_mut()
+        .ok_or(resource::BufferAccessError::Destroyed)?
+        .1;
     let ptr = block.map(raw, offset, size).map_err(DeviceError::from)?;
 
     buffer.sync_mapped_writes = match kind {
@@ -226,16 +234,17 @@ fn map_buffer<B: hal::Backend>(
 
 fn unmap_buffer<B: hal::Backend>(
     raw: &B::Device,
-    buffer: &mut resource::Buffer<B>,
+    buffer: &resource::Buffer<B>,
 ) -> Result<(), resource::BufferAccessError> {
-    let &mut (_, ref mut block) = buffer
+    let block = &buffer
         .raw
-        .as_mut()
-        .ok_or(resource::BufferAccessError::Destroyed)?;
-    if let Some(segment) = buffer.sync_mapped_writes.take() {
+        .as_deref()
+        .ok_or(resource::BufferAccessError::Destroyed)?
+        .1;
+    if let Some(segment) = &buffer.sync_mapped_writes {
         block.flush_range(raw, segment.offset, segment.size)?;
     }
-    block.unmap(raw);
+    /* block.unmap(raw); */
     Ok(())
 }
 
@@ -253,6 +262,29 @@ pub(crate) struct RenderPassLock<B: hal::Backend> {
     pub(crate) framebuffers: FastHashMap<FramebufferKey, B::Framebuffer>,
 }
 
+#[derive(Debug)]
+pub(crate) struct QueueInner<B: hal::Backend> {
+    pub(crate) raw: hal::queue::QueueGroup<B>,
+    /* /// NOTE: ManuallyDrop so we can safely move out of an `&mut` reference to the fence
+    /// within the destructor for Self.
+    fence: A::Fence, */
+    pending_writes: queue::PendingWrites<B>,
+    /// NOTE: While it might seem like we could pull this out into an atomic, currently there are
+    /// no places where we use this that we aren't grabbing the pending_writes vector already.
+    /// Besides, just holding the lock makes it easier to reason about the index than using an
+    /// atomic (since we don't want to miss any pending writes accidentally, doing this without a
+    /// lock would probably be somewhat complicated.  But maybe there's a library that already
+    /// handles this for us?).
+    //Note: The submission index here corresponds to the last submission that is done.
+    pub(crate) active_submission_index: SubmissionIndex,
+}
+
+/* pub(crate) struct Queue<B: hal::Backend> {
+    pub(crate) inner: Mutex<ManuallyDrop<QueueInner<B>>>,
+    life_tracker: Mutex<life::LifetimeTracker<B>>,
+    command_allocator: Mutex<CommandAllocator<B>>,
+} */
+
 /// Structure describing a logical device. Some members are internally mutable,
 /// stored behind mutexes.
 /// TODO: establish clear order of locking for these:
@@ -267,28 +299,24 @@ pub(crate) struct RenderPassLock<B: hal::Backend> {
 pub struct Device<B: hal::Backend> {
     pub(crate) raw: B::Device,
     pub(crate) adapter_id: Stored<id::AdapterId>,
-    pub(crate) queue_group: hal::queue::QueueGroup<B>,
+    /* pub(crate) queue_group: hal::queue::QueueGroup<B>, */
     pub(crate) cmd_allocator: command::CommandAllocator<B>,
     mem_allocator: Mutex<alloc::MemoryAllocator<B>>,
     desc_allocator: Mutex<descriptor::DescriptorAllocator<B>>,
-    //Note: The submission index here corresponds to the last submission that is done.
     pub(crate) life_guard: LifeGuard,
-    pub(crate) active_submission_index: SubmissionIndex,
+    /* pub(crate) active_submission_index: SubmissionIndex, */
     /// Has to be locked temporarily only (locked last)
-    pub(crate) trackers: Mutex<TrackerSet>,
+    pub(crate) trackers: Mutex</*TrackerSet*/ Trackers /*<B>*/>,
     pub(crate) render_passes: Mutex<RenderPassLock<B>>,
-    // Life tracker should be locked right after the device and before anything else.
-    life_tracker: Mutex<life::LifetimeTracker<B>>,
-    temp_suspected: life::SuspectedResources,
     pub(crate) hal_limits: hal::Limits,
     pub(crate) private_features: PrivateFeatures,
     pub(crate) limits: wgt::Limits,
     pub(crate) features: wgt::Features,
     pub(crate) downlevel: wgt::DownlevelProperties,
     spv_options: naga::back::spv::Options,
-    //TODO: move this behind another mutex. This would allow several methods to switch
-    // to borrow Device immutably, such as `write_buffer`, `write_texture`, and `buffer_unmap`.
-    pending_writes: queue::PendingWrites<B>,
+    pub(crate) queue: Mutex</*ManuallyDrop<*/ QueueInner<B> /*>*/>,
+    life_tracker: Mutex<life::LifetimeTracker<B>>,
+    /* command_allocator: Mutex<command::CommandAllocator<B>>, */
     #[cfg(feature = "trace")]
     pub(crate) trace: Option<Mutex<trace::Trace>>,
 }
@@ -357,16 +385,18 @@ impl<B: GfxBackend> Device<B> {
             cmd_allocator,
             mem_allocator: Mutex::new(mem_allocator),
             desc_allocator: Mutex::new(descriptors),
-            queue_group,
+            queue: Mutex::new(QueueInner {
+                raw: queue_group,
+                active_submission_index: 0,
+                pending_writes: queue::PendingWrites::new(),
+            }),
             life_guard: LifeGuard::new("<device>"),
-            active_submission_index: 0,
             trackers: Mutex::new(TrackerSet::new(B::VARIANT)),
             render_passes: Mutex::new(RenderPassLock {
                 render_passes: FastHashMap::default(),
                 framebuffers: FastHashMap::default(),
             }),
             life_tracker: Mutex::new(life::LifetimeTracker::new()),
-            temp_suspected: life::SuspectedResources::default(),
             #[cfg(feature = "trace")]
             trace: trace_path.and_then(|path| match trace::Trace::new(path) {
                 Ok(mut trace) => {
@@ -387,7 +417,6 @@ impl<B: GfxBackend> Device<B> {
             features: desc.features,
             downlevel,
             spv_options,
-            pending_writes: queue::PendingWrites::new(),
         })
     }
 
@@ -403,113 +432,132 @@ impl<B: GfxBackend> Device<B> {
         self.life_guard.submission_index.load(Ordering::Acquire)
     }
 
-    fn lock_life_internal<'this, 'token: 'this>(
-        tracker: &'this Mutex<life::LifetimeTracker<B>>,
-        _token: &mut Token<'token, Self>,
-    ) -> MutexGuard<'this, life::LifetimeTracker<B>> {
-        tracker.lock()
-    }
-
-    fn lock_life<'this, 'token: 'this>(
-        &'this self,
-        //TODO: fix this - the token has to be borrowed for the lock
-        token: &mut Token<'token, Self>,
-    ) -> MutexGuard<'this, life::LifetimeTracker<B>> {
-        Self::lock_life_internal(&self.life_tracker, token)
-    }
-
     fn maintain<'this, 'token: 'this, G: GlobalIdentityHandlerFactory>(
         &'this self,
         hub: &Hub<B, G>,
         force_wait: bool,
-        token: &mut Token<'token, Self>,
+        temp_suspected: &life::SuspectedResources,
+        mut bgl_guard: RwLockWriteGuard<
+            Storage<binding_model::BindGroupLayout<B>, id::BindGroupLayoutId>,
+        >,
+        mut buffer_guard: RwLockWriteGuard<Storage<resource::Buffer<B>, id::BufferId>>,
+        mut texture_guard: RwLockWriteGuard<Storage<resource::Texture<B>, id::TextureId>>,
+        mut trackers: MutexGuard<TrackerSet>,
+        queue_inner_guard: MutexGuard<QueueInner<B>>,
+        token: &mut Token<'token, /*ManuallyDrop<*/ QueueInner<B> /*>*/>,
     ) -> Result<Vec<BufferMapPendingCallback>, WaitIdleError> {
         profiling::scope!("maintain", "Device");
-        let mut life_tracker = self.lock_life(token);
+        let (mut life_tracker, mut token) = token.lock::<LifetimeTracker<B>>(&self.life_tracker);
 
         life_tracker.triage_suspected(
             hub,
-            &self.trackers,
+            &mut *trackers,
             #[cfg(feature = "trace")]
             self.trace.as_ref(),
-            token,
+            &mut *bgl_guard,
+            &mut *buffer_guard,
+            &mut *texture_guard,
+            &mut token,
         );
-        life_tracker.triage_mapped(hub, token);
-        let last_done = life_tracker.triage_submissions(&self.raw, force_wait)?;
-        let callbacks = life_tracker.handle_mapping(hub, &self.raw, &self.trackers, token);
-        life_tracker.cleanup(&self.raw, &self.mem_allocator, &self.desc_allocator);
+        drop(bgl_guard);
+        drop(texture_guard);
+        life_tracker.triage_mapped(/*hub, token*/ &mut *buffer_guard);
+        let last_done = life_tracker
+            .triage_submissions(&self.raw /*, &self.command_allocator*/, force_wait)?;
+        let callbacks = life_tracker.handle_mapping(
+            hub,
+            &self.raw,
+            /*&self.trackers, token*/ &mut *trackers,
+            &mut *buffer_guard,
+        );
+        drop(buffer_guard);
+        drop(trackers);
+        // life_tracker.cleanup(&self.raw, &self.mem_allocator, &self.desc_allocator);
 
         self.life_guard
             .submission_index
             .store(last_done, Ordering::Release);
+        drop(queue_inner_guard);
+
+        life_tracker.suspected_resources.extend(&*temp_suspected);
+        LifetimeTracker::cleanup(
+            life_tracker,
+            &self.raw,
+            &self.mem_allocator,
+            &self.desc_allocator,
+        );
+
         self.cmd_allocator.maintain(&self.raw, last_done);
         Ok(callbacks)
     }
 
     fn untrack<'this, 'token: 'this, G: GlobalIdentityHandlerFactory>(
-        &'this mut self,
+        &'this self,
         hub: &Hub<B, G>,
         trackers: &TrackerSet,
-        mut token: &mut Token<'token, Self>,
+        temp_suspected: &mut life::SuspectedResources,
+        token: &mut Token<'token, Self>,
     ) {
-        self.temp_suspected.clear();
+        temp_suspected.clear();
         // As the tracker is cleared/dropped, we need to consider all the resources
         // that it references for destruction in the next GC pass.
         {
+            let (buffer_guard, mut token) = hub.buffers.read(token);
+            let (texture_guard, mut token) = hub.textures.read(&mut token);
             let (bind_group_guard, mut token) = hub.bind_groups.read(&mut token);
             let (compute_pipe_guard, mut token) = hub.compute_pipelines.read(&mut token);
             let (render_pipe_guard, mut token) = hub.render_pipelines.read(&mut token);
             let (query_set_guard, mut token) = hub.query_sets.read(&mut token);
-            let (buffer_guard, mut token) = hub.buffers.read(&mut token);
-            let (texture_guard, mut token) = hub.textures.read(&mut token);
             let (texture_view_guard, mut token) = hub.texture_views.read(&mut token);
             let (sampler_guard, _) = hub.samplers.read(&mut token);
 
             for id in trackers.buffers.used() {
                 if buffer_guard[id].life_guard.ref_count.is_none() {
-                    self.temp_suspected.buffers.push(id);
+                    temp_suspected.buffers.push(id);
                 }
             }
             for id in trackers.textures.used() {
                 if texture_guard[id].life_guard.ref_count.is_none() {
-                    self.temp_suspected.textures.push(id);
+                    temp_suspected.textures.push(id);
                 }
             }
             for id in trackers.views.used() {
                 if texture_view_guard[id].life_guard.ref_count.is_none() {
-                    self.temp_suspected.texture_views.push(id);
+                    temp_suspected.texture_views.push(id);
                 }
             }
             for id in trackers.bind_groups.used() {
                 if bind_group_guard[id].life_guard.ref_count.is_none() {
-                    self.temp_suspected.bind_groups.push(id);
+                    temp_suspected.bind_groups.push(id);
                 }
             }
             for id in trackers.samplers.used() {
                 if sampler_guard[id].life_guard.ref_count.is_none() {
-                    self.temp_suspected.samplers.push(id);
+                    temp_suspected.samplers.push(id);
                 }
             }
             for id in trackers.compute_pipes.used() {
                 if compute_pipe_guard[id].life_guard.ref_count.is_none() {
-                    self.temp_suspected.compute_pipelines.push(id);
+                    temp_suspected.compute_pipelines.push(id);
                 }
             }
             for id in trackers.render_pipes.used() {
                 if render_pipe_guard[id].life_guard.ref_count.is_none() {
-                    self.temp_suspected.render_pipelines.push(id);
+                    temp_suspected.render_pipelines.push(id);
                 }
             }
             for id in trackers.query_sets.used() {
                 if query_set_guard[id].life_guard.ref_count.is_none() {
-                    self.temp_suspected.query_sets.push(id);
+                    temp_suspected.query_sets.push(id);
                 }
             }
         }
 
-        self.lock_life(&mut token)
+        token
+            .lock::<LifetimeTracker<B>>(&self.life_tracker)
+            .0
             .suspected_resources
-            .extend(&self.temp_suspected);
+            .extend(&temp_suspected);
     }
 
     fn create_buffer(
@@ -599,7 +647,7 @@ impl<B: GfxBackend> Device<B> {
         block.bind_buffer(&self.raw, &mut buffer)?;
 
         Ok(resource::Buffer {
-            raw: Some((buffer, block)),
+            raw: Some(Box::new((buffer, block))),
             device_id: Stored {
                 value: id::Valid(self_id),
                 ref_count: self.life_guard.add_ref(),
@@ -725,7 +773,7 @@ impl<B: GfxBackend> Device<B> {
         block.bind_image(&self.raw, &mut image)?;
 
         Ok(resource::Texture {
-            raw: Some((image, block)),
+            raw: Some(Box::new((image, block))),
             device_id: Stored {
                 value: id::Valid(self_id),
                 ref_count: self.life_guard.add_ref(),
@@ -757,7 +805,7 @@ impl<B: GfxBackend> Device<B> {
     ) -> Result<resource::TextureView<B>, resource::CreateTextureViewError> {
         let &(ref texture_raw, _) = texture
             .raw
-            .as_ref()
+            .as_deref()
             .ok_or(resource::CreateTextureViewError::InvalidTexture)?;
 
         let view_dim =
@@ -1395,7 +1443,7 @@ impl<B: GfxBackend> Device<B> {
         check_buffer_usage(buffer.usage, pub_usage)?;
         let &(ref buffer_raw, _) = buffer
             .raw
-            .as_ref()
+            .as_deref()
             .ok_or(Error::InvalidBuffer(bb.buffer_id))?;
 
         let (bind_size, bind_end) = match bb.size {
@@ -1989,8 +2037,8 @@ impl<B: GfxBackend> Device<B> {
         token: &mut Token<Self>,
     ) -> Result<pipeline::ComputePipeline<B>, pipeline::CreateComputePipelineError> {
         //TODO: only lock mutable if the layout is derived
-        let (mut pipeline_layout_guard, mut token) = hub.pipeline_layouts.write(token);
-        let (mut bgl_guard, mut token) = hub.bind_group_layouts.write(&mut token);
+        let (mut bgl_guard, mut token) = hub.bind_group_layouts.write(token);
+        let (mut pipeline_layout_guard, mut token) = hub.pipeline_layouts.write(&mut token);
 
         // This has to be done first, or otherwise the IDs may be pointing to entries
         // that are not even in the storage.
@@ -2120,8 +2168,8 @@ impl<B: GfxBackend> Device<B> {
         token: &mut Token<Self>,
     ) -> Result<pipeline::RenderPipeline<B>, pipeline::CreateRenderPipelineError> {
         //TODO: only lock mutable if the layout is derived
-        let (mut pipeline_layout_guard, mut token) = hub.pipeline_layouts.write(token);
-        let (mut bgl_guard, mut token) = hub.bind_group_layouts.write(&mut token);
+        let (mut bgl_guard, mut token) = hub.bind_group_layouts.write(token);
+        let (mut pipeline_layout_guard, mut token) = hub.pipeline_layouts.write(&mut token);
 
         // This has to be done first, or otherwise the IDs may be pointing to entries
         // that are not even in the storage.
@@ -2647,13 +2695,19 @@ impl<B: GfxBackend> Device<B> {
 
     fn wait_for_submit(
         &self,
+        /* // NOTE: Used in later versions of wgpu.
+        _queue_inner: &QueueInner<B>, */
         submission_index: SubmissionIndex,
-        token: &mut Token<Self>,
+        token: &mut Token</*QueueInner<B>*/ Self>,
     ) -> Result<(), WaitIdleError> {
         if self.last_completed_submission_index() <= submission_index {
             log::info!("Waiting for submission {:?}", submission_index);
-            self.lock_life(token)
-                .triage_submissions(&self.raw, true)
+            token
+                .lock(&self.life_tracker)
+                .0
+                .triage_submissions(
+                    /*submission_index, &self.command_allocator*/ &self.raw, true,
+                )
                 .map(|_| ())
         } else {
             Ok(())
@@ -2710,7 +2764,7 @@ impl<B: hal::Backend> Device<B> {
     }
 
     pub(crate) fn destroy_buffer(&self, buffer: resource::Buffer<B>) {
-        if let Some((raw, memory)) = buffer.raw {
+        if let Some((raw, memory)) = buffer.raw.map(|buffer| *buffer) {
             unsafe {
                 self.mem_allocator.lock().free(&self.raw, memory);
                 self.raw.destroy_buffer(raw);
@@ -2719,7 +2773,7 @@ impl<B: hal::Backend> Device<B> {
     }
 
     pub(crate) fn destroy_texture(&self, texture: resource::Texture<B>) {
-        if let Some((raw, memory)) = texture.raw {
+        if let Some((raw, memory)) = texture.raw.map(|texture| *texture) {
             unsafe {
                 self.mem_allocator.lock().free(&self.raw, memory);
                 self.raw.destroy_image(raw);
@@ -2733,14 +2787,22 @@ impl<B: hal::Backend> Device<B> {
         if let Err(error) = life_tracker.triage_submissions(&self.raw, true) {
             log::error!("failed to triage submissions: {}", error);
         }
-        life_tracker.cleanup(&self.raw, &self.mem_allocator, &self.desc_allocator);
+        LifetimeTracker::cleanup(
+            life_tracker,
+            &self.raw,
+            &self.mem_allocator,
+            &self.desc_allocator,
+        );
     }
 
     pub(crate) fn dispose(self) {
         let mut desc_alloc = self.desc_allocator.into_inner();
         let mut mem_alloc = self.mem_allocator.into_inner();
-        self.pending_writes
-            .dispose(&self.raw, &self.cmd_allocator, &mut mem_alloc);
+        self.queue.into_inner().pending_writes.dispose(
+            &self.raw,
+            &self.cmd_allocator,
+            &mut mem_alloc,
+        );
         self.cmd_allocator.destroy(&self.raw);
         unsafe {
             desc_alloc.cleanup(&self.raw);
@@ -2938,12 +3000,15 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                 let ptr = match map_buffer(&device.raw, &mut buffer, 0, map_size, HostMap::Write) {
                     Ok(ptr) => ptr,
                     Err(e) => {
-                        let (raw, memory) = buffer.raw.unwrap();
-                        device.lock_life(&mut token).schedule_resource_destruction(
-                            queue::TempResource::Buffer(raw),
-                            memory,
-                            !0,
-                        );
+                        let (raw, memory) = *buffer.raw.unwrap();
+                        token
+                            .lock(&device.life_tracker)
+                            .0
+                            .schedule_resource_destruction(
+                                queue::TempResource::Buffer(raw),
+                                memory,
+                                !0,
+                            );
                         break e.into();
                     }
                 };
@@ -2964,21 +3029,24 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                 let mut stage = match device.create_buffer(device_id, &stage_desc, true) {
                     Ok(stage) => stage,
                     Err(e) => {
-                        let (raw, memory) = buffer.raw.unwrap();
-                        device.lock_life(&mut token).schedule_resource_destruction(
-                            queue::TempResource::Buffer(raw),
-                            memory,
-                            !0,
-                        );
+                        let (raw, memory) = *buffer.raw.unwrap();
+                        token
+                            .lock(&device.life_tracker)
+                            .0
+                            .schedule_resource_destruction(
+                                queue::TempResource::Buffer(raw),
+                                memory,
+                                !0,
+                            );
                         break e;
                     }
                 };
-                let (stage_buffer, mut stage_memory) = stage.raw.unwrap();
+                let (stage_buffer, mut stage_memory) = *stage.raw.unwrap();
                 let ptr = match stage_memory.map(&device.raw, 0, stage.size) {
                     Ok(ptr) => ptr,
                     Err(e) => {
-                        let (raw, memory) = buffer.raw.unwrap();
-                        let mut life_lock = device.lock_life(&mut token);
+                        let (raw, memory) = *buffer.raw.unwrap();
+                        let (mut life_lock, _) = token.lock(&device.life_tracker);
                         life_lock.schedule_resource_destruction(
                             queue::TempResource::Buffer(raw),
                             memory,
@@ -3011,9 +3079,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             let id = fid.assign(buffer, &mut token);
             log::info!("Created buffer {:?} with {:?}", id, desc);
 
-            device
-                .trackers
-                .lock()
+            token
+                .lock(&device.trackers)
+                .0
                 .buffers
                 .init(id, ref_count, BufferState::with_usage(buffer_use))
                 .unwrap();
@@ -3034,17 +3102,18 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let mut token = Token::root();
         let (device_guard, mut token) = hub.devices.read(&mut token);
         let last_submission = {
-            let (buffer_guard, _) = hub.buffers.write(&mut token);
+            let (buffer_guard, _) = hub.buffers.read(&mut token);
             match buffer_guard.get(buffer_id) {
                 Ok(buffer) => buffer.life_guard.submission_index.load(Ordering::Acquire),
                 Err(_) => return Ok(()),
             }
         };
 
-        device_guard
+        let device = device_guard
             .get(device_id)
-            .map_err(|_| DeviceError::Invalid)?
-            .wait_for_submit(last_submission, &mut token)
+            .map_err(|_| DeviceError::Invalid)?;
+        /* let (queue_inner_guard, mut token) = token.lock(&device.queue); */
+        device.wait_for_submit(/*&*queue_inner_guard, */ last_submission, &mut token)
     }
 
     pub fn device_set_buffer_sub_data<B: GfxBackend>(
@@ -3084,7 +3153,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         buffer
             .raw
-            .as_mut()
+            .as_deref_mut()
             .unwrap()
             .1
             .write_bytes(&device.raw, offset, data)?;
@@ -3117,7 +3186,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         buffer
             .raw
-            .as_mut()
+            .as_deref_mut()
             .unwrap()
             .1
             .read_bytes(&device.raw, offset, data)?;
@@ -3129,6 +3198,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         B::hub(self).buffers.label_for_resource(id)
     }
 
+    /// Safety: must synchronize with any calls to queue_write_buffer for the same buffer.
+    ///
+    /// NOTE: Currently NOT marked unsafe to make it easier to integrate with the gfx_select!
+    /// macro, but it should be marked unsafe if this is backported to non-Veloren wgpu.
     pub fn buffer_destroy<B: GfxBackend>(
         &self,
         buffer_id: id::BufferId,
@@ -3138,43 +3211,53 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let hub = B::hub(self);
         let mut token = Token::root();
 
-        //TODO: lock pending writes separately, keep the device read-only
-        let (mut device_guard, mut token) = hub.devices.write(&mut token);
+        let (device_guard, mut token) = hub.devices.read(&mut token);
 
         log::info!("Buffer {:?} is destroyed", buffer_id);
-        let (mut buffer_guard, _) = hub.buffers.write(&mut token);
+        let (mut buffer_guard, mut token) = hub.buffers.write(&mut token);
         let buffer = buffer_guard
             .get_mut(buffer_id)
             .map_err(|_| resource::DestroyError::Invalid)?;
 
-        let device = &mut device_guard[buffer.device_id.value];
+        let device = &device_guard[buffer.device_id.value];
+
+        // FIXME: Only need to take in the else clause after we get rid of pending_writes.
+        let (mut queue_inner_guard, mut token) = token.lock(&device.queue);
 
         #[cfg(feature = "trace")]
         if let Some(ref trace) = device.trace {
             trace.lock().add(trace::Action::FreeBuffer(buffer_id));
         }
 
-        let (raw, memory) = buffer
+        // NOTE: Since the queue guard is taken, we know this synchronizes with calls to
+        // [queue_write_buffer], fulfilling our safety requirement.
+        let (raw, memory) = *buffer
             .raw
             .take()
             .ok_or(resource::DestroyError::AlreadyDestroyed)?;
+
         let temp = queue::TempResource::Buffer(raw);
 
-        if device.pending_writes.dst_buffers.contains(&buffer_id) {
-            device.pending_writes.temp_resources.push((temp, memory));
+        let pending_writes = &mut queue_inner_guard.pending_writes;
+        if pending_writes.dst_buffers.contains(&buffer_id) {
+            pending_writes.temp_resources.push((temp, memory));
         } else {
-            let last_submit_index = buffer.life_guard.submission_index.load(Ordering::Acquire);
+            let last_submit_index = *buffer.life_guard.submission_index.get_mut();
             drop(buffer_guard);
-            device.lock_life(&mut token).schedule_resource_destruction(
-                temp,
-                memory,
-                last_submit_index,
-            );
+            drop(queue_inner_guard);
+            token
+                .lock(&device.life_tracker)
+                .0
+                .schedule_resource_destruction(temp, memory, last_submit_index);
         }
 
         Ok(())
     }
 
+    /// Safety: must synchronize with any calls to queue_write_buffer for the same buffer.
+    ///
+    /// NOTE: Currently NOT marked unsafe to make it easier to integrate with the gfx_select!
+    /// macro, but it should be marked unsafe if this is backported to non-Veloren wgpu.
     pub fn buffer_drop<B: GfxBackend>(&self, buffer_id: id::BufferId, wait: bool) {
         profiling::scope!("drop", "Buffer");
 
@@ -3182,13 +3265,14 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let mut token = Token::root();
 
         log::info!("Buffer {:?} is dropped", buffer_id);
+        // let is_submitted_init;
         let (ref_count, last_submit_index, device_id) = {
             let (mut buffer_guard, _) = hub.buffers.write(&mut token);
             match buffer_guard.get_mut(buffer_id) {
                 Ok(buffer) => {
                     let ref_count = buffer.life_guard.ref_count.take().unwrap();
-                    let last_submit_index =
-                        buffer.life_guard.submission_index.load(Ordering::Acquire);
+                    let last_submit_index = *buffer.life_guard.submission_index.get_mut();
+                    /* is_submitted_init = matches!(buffer.map_state, resource::BufferMapState::Init { .. }) && last_submit_index != 0; */
                     (ref_count, last_submit_index, buffer.device_id.value)
                 }
                 Err(InvalidId) => {
@@ -3200,14 +3284,24 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         let (device_guard, mut token) = hub.devices.read(&mut token);
         let device = &device_guard[device_id];
+        let (mut queue_inner_guard, mut token_) = token.lock(&device.queue);
+        let pending_writes = &mut queue_inner_guard.pending_writes;
         {
-            let mut life_lock = device.lock_life(&mut token);
-            if device.pending_writes.dst_buffers.contains(&buffer_id) {
+            let (mut life_lock, _) = token_.lock::<LifetimeTracker<B>>(&device.life_tracker);
+            if pending_writes.dst_buffers.contains(&buffer_id)
+            /* || is_submitted_init*/
+            {
+                /* if is_submitted_init {
+                    // println!("future: {:?} / {:?}", buffer_id, last_submit_index);
+                } */
                 life_lock.future_suspected_buffers.push(Stored {
                     value: id::Valid(buffer_id),
                     ref_count,
                 });
             } else {
+                /* if is_submitted_init {
+                    println!("past: {:?} / {:?}", buffer_id, last_submit_index);
+                } */
                 drop(ref_count);
                 life_lock
                     .suspected_resources
@@ -3215,9 +3309,12 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                     .push(id::Valid(buffer_id));
             }
         }
+        drop((queue_inner_guard, token_));
 
         if wait {
-            match device.wait_for_submit(last_submit_index, &mut token) {
+            match device
+                .wait_for_submit(/*&*queue_inner_guard, */ last_submit_index, &mut token)
+            {
                 Ok(()) => (),
                 Err(e) => log::error!("Failed to wait for buffer {:?}: {:?}", buffer_id, e),
             }
@@ -3262,9 +3359,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             let id = fid.assign(texture, &mut token);
             log::info!("Created texture {:?} with {:?}", id, desc);
 
-            device
-                .trackers
-                .lock()
+            token
+                .lock(&device.trackers)
+                .0
                 .textures
                 .init(id, ref_count, TextureState::new(num_levels, num_layers))
                 .unwrap();
@@ -3279,6 +3376,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         B::hub(self).textures.label_for_resource(id)
     }
 
+    /// Safety: must synchronize with any calls to queue_write_texture for the same texture.
+    ///
+    /// NOTE: Currently NOT marked unsafe to make it easier to integrate with the gfx_select!
+    /// macro, but it should be marked unsafe if this is backported to non-Veloren wgpu.
     pub fn texture_destroy<B: GfxBackend>(
         &self,
         texture_id: id::TextureId,
@@ -3289,42 +3390,48 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let mut token = Token::root();
 
         //TODO: lock pending writes separately, keep the device read-only
-        let (mut device_guard, mut token) = hub.devices.write(&mut token);
+        let (device_guard, mut token) = hub.devices.read(&mut token);
 
         log::info!("Buffer {:?} is destroyed", texture_id);
-        let (mut texture_guard, _) = hub.textures.write(&mut token);
+        let (mut texture_guard, mut token) = hub.textures.write(&mut token);
         let texture = texture_guard
             .get_mut(texture_id)
             .map_err(|_| resource::DestroyError::Invalid)?;
 
-        let device = &mut device_guard[texture.device_id.value];
+        let device = &device_guard[texture.device_id.value];
 
         #[cfg(feature = "trace")]
         if let Some(ref trace) = device.trace {
             trace.lock().add(trace::Action::FreeTexture(texture_id));
         }
 
-        let (raw, memory) = texture
+        let (raw, memory) = *texture
             .raw
             .take()
             .ok_or(resource::DestroyError::AlreadyDestroyed)?;
         let temp = queue::TempResource::Image(raw);
 
-        if device.pending_writes.dst_textures.contains(&texture_id) {
-            device.pending_writes.temp_resources.push((temp, memory));
+        let (mut queue_inner_guard, mut token) = token.lock(&device.queue);
+        let pending_writes = &mut queue_inner_guard.pending_writes;
+        if pending_writes.dst_textures.contains(&texture_id) {
+            pending_writes.temp_resources.push((temp, memory));
         } else {
-            let last_submit_index = texture.life_guard.submission_index.load(Ordering::Acquire);
+            let last_submit_index = *texture.life_guard.submission_index.get_mut();
+            drop(queue_inner_guard);
             drop(texture_guard);
-            device.lock_life(&mut token).schedule_resource_destruction(
-                temp,
-                memory,
-                last_submit_index,
-            );
+            token
+                .lock(&device.life_tracker)
+                .0
+                .schedule_resource_destruction(temp, memory, last_submit_index);
         }
 
         Ok(())
     }
 
+    /// Safety: must synchronize with any calls to queue_write_texture for the same texture.
+    ///
+    /// NOTE: Currently NOT marked unsafe to make it easier to integrate with the gfx_select!
+    /// macro, but it should be marked unsafe if this is backported to non-Veloren wgpu.
     pub fn texture_drop<B: GfxBackend>(&self, texture_id: id::TextureId, wait: bool) {
         profiling::scope!("drop", "Texture");
 
@@ -3336,8 +3443,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             match texture_guard.get_mut(texture_id) {
                 Ok(texture) => {
                     let ref_count = texture.life_guard.ref_count.take().unwrap();
-                    let last_submit_index =
-                        texture.life_guard.submission_index.load(Ordering::Acquire);
+                    let last_submit_index = *texture.life_guard.submission_index.get_mut();
                     (ref_count, last_submit_index, texture.device_id.value)
                 }
                 Err(InvalidId) => {
@@ -3350,9 +3456,11 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         let (device_guard, mut token) = hub.devices.read(&mut token);
         let device = &device_guard[device_id];
+        let (mut queue_inner_guard, mut token_) = token.lock(&device.queue);
+        let pending_writes = &mut queue_inner_guard.pending_writes;
         {
-            let mut life_lock = device.lock_life(&mut token);
-            if device.pending_writes.dst_textures.contains(&texture_id) {
+            let (mut life_lock, _) = token_.lock(&device.life_tracker);
+            if pending_writes.dst_textures.contains(&texture_id) {
                 life_lock.future_suspected_textures.push(Stored {
                     value: id::Valid(texture_id),
                     ref_count,
@@ -3365,9 +3473,12 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                     .push(id::Valid(texture_id));
             }
         }
+        drop((queue_inner_guard, token_));
 
         if wait {
-            match device.wait_for_submit(last_submit_index, &mut token) {
+            match device
+                .wait_for_submit(/*&*queue_inner_guard, */ last_submit_index, &mut token)
+            {
                 Ok(()) => (),
                 Err(e) => log::error!("Failed to wait for texture {:?}: {:?}", texture_id, e),
             }
@@ -3410,9 +3521,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             let ref_count = view.life_guard.add_ref();
             let id = fid.assign(view, &mut token);
 
-            device
-                .trackers
-                .lock()
+            token
+                .lock(&device.trackers)
+                .0
                 .views
                 .init(id, ref_count, PhantomData)
                 .unwrap();
@@ -3444,8 +3555,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             match texture_view_guard.get_mut(texture_view_id) {
                 Ok(view) => {
                     let _ref_count = view.life_guard.ref_count.take();
-                    let last_submit_index =
-                        view.life_guard.submission_index.load(Ordering::Acquire);
+                    let last_submit_index = *view.life_guard.submission_index.get_mut();
                     let device_id = match view.inner {
                         resource::TextureViewInner::Native { ref source_id, .. } => {
                             texture_guard[source_id.value].device_id.value
@@ -3466,14 +3576,18 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         let (device_guard, mut token) = hub.devices.read(&mut token);
         let device = &device_guard[device_id];
-        device
-            .lock_life(&mut token)
+        token
+            .lock(&device.life_tracker)
+            .0
             .suspected_resources
             .texture_views
             .push(id::Valid(texture_view_id));
 
         if wait {
-            match device.wait_for_submit(last_submit_index, &mut token) {
+            /* let (queue_inner_guard, mut token) = token.lock(&device.queue); */
+            match device
+                .wait_for_submit(/*&*queue_inner_guard, */ last_submit_index, &mut token)
+            {
                 Ok(()) => (),
                 Err(e) => log::error!(
                     "Failed to wait for texture view {:?}: {:?}",
@@ -3517,9 +3631,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             let ref_count = sampler.life_guard.add_ref();
             let id = fid.assign(sampler, &mut token);
 
-            device
-                .trackers
-                .lock()
+            token
+                .lock(&device.trackers)
+                .0
                 .samplers
                 .init(id, ref_count, PhantomData)
                 .unwrap();
@@ -3556,8 +3670,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         };
 
         let (device_guard, mut token) = hub.devices.read(&mut token);
-        device_guard[device_id]
-            .lock_life(&mut token)
+        let device = &device_guard[device_id];
+        token
+            .lock(&device.life_tracker)
+            .0
             .suspected_resources
             .samplers
             .push(id::Valid(sampler_id));
@@ -3654,8 +3770,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         };
 
         let (device_guard, mut token) = hub.devices.read(&mut token);
-        device_guard[device_id]
-            .lock_life(&mut token)
+        let device = &device_guard[device_id];
+        token
+            .lock(&device.life_tracker)
+            .0
             .suspected_resources
             .bind_group_layouts
             .push(id::Valid(bind_group_layout_id));
@@ -3730,8 +3848,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         };
 
         let (device_guard, mut token) = hub.devices.read(&mut token);
-        device_guard[device_id]
-            .lock_life(&mut token)
+        let device = &device_guard[device_id];
+        token
+            .lock(&device.life_tracker)
+            .0
             .suspected_resources
             .pipeline_layouts
             .push(Stored {
@@ -3790,9 +3910,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                 hub.bind_groups.read(&mut token).0[id].used
             );
 
-            device
-                .trackers
-                .lock()
+            token
+                .lock(&device.trackers)
+                .0
                 .bind_groups
                 .init(id, ref_count, PhantomData)
                 .unwrap();
@@ -3829,8 +3949,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         };
 
         let (device_guard, mut token) = hub.devices.read(&mut token);
-        device_guard[device_id]
-            .lock_life(&mut token)
+        let device = &device_guard[device_id];
+        token
+            .lock(&device.life_tracker)
+            .0
             .suspected_resources
             .bind_groups
             .push(id::Valid(bind_group_id));
@@ -3984,13 +4106,19 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let hub = B::hub(self);
         let mut token = Token::root();
 
-        let (mut device_guard, mut token) = hub.devices.write(&mut token);
+        let (mut temp_suspected_guard, mut token) = token.lock(&hub.temp_suspected);
+        let (device_guard, mut token) = hub.devices.read(&mut token);
         let (cmdbuf, _) = hub
             .command_buffers
             .unregister(command_encoder_id, &mut token);
         if let Some(cmdbuf) = cmdbuf {
-            let device = &mut device_guard[cmdbuf.device_id.value];
-            device.untrack::<G>(&hub, &cmdbuf.trackers, &mut token);
+            let device = &device_guard[cmdbuf.device_id.value];
+            device.untrack::<G>(
+                &hub,
+                &cmdbuf.trackers,
+                &mut temp_suspected_guard,
+                &mut token,
+            );
             device.cmd_allocator.discard(cmdbuf);
         }
     }
@@ -4055,9 +4183,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             let ref_count = render_bundle.life_guard.add_ref();
             let id = fid.assign(render_bundle, &mut token);
 
-            device
-                .trackers
-                .lock()
+            token
+                .lock(&device.trackers)
+                .0
                 .bundles
                 .init(id, ref_count, PhantomData)
                 .unwrap();
@@ -4093,8 +4221,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             }
         };
 
-        device_guard[device_id]
-            .lock_life(&mut token)
+        let device = &device_guard[device_id];
+        token
+            .lock(&device.life_tracker)
+            .0
             .suspected_resources
             .render_bundles
             .push(id::Valid(render_bundle_id));
@@ -4134,9 +4264,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             let ref_count = query_set.life_guard.add_ref();
             let id = fid.assign(query_set, &mut token);
 
-            device
-                .trackers
-                .lock()
+            token
+                .lock(&device.trackers)
+                .0
                 .query_sets
                 .init(id, ref_count, PhantomData)
                 .unwrap();
@@ -4171,8 +4301,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                 .add(trace::Action::DestroyQuerySet(query_set_id));
         }
 
-        device
-            .lock_life(&mut token)
+        token
+            .lock(&device.life_tracker)
+            .0
             .suspected_resources
             .query_sets
             .push(id::Valid(query_set_id));
@@ -4243,10 +4374,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) {
         let hub = B::hub(self);
         let mut token = Token::root();
-        let (pipeline_layout_guard, mut token) = hub.pipeline_layouts.read(&mut token);
 
         let error = loop {
             let (bgl_guard, mut token) = hub.bind_group_layouts.read(&mut token);
+            let (pipeline_layout_guard, mut token) = hub.pipeline_layouts.read(&mut token);
             let (_, mut token) = hub.bind_groups.read(&mut token);
             let (pipeline_guard, _) = hub.render_pipelines.read(&mut token);
 
@@ -4298,7 +4429,8 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             }
         };
 
-        let mut life_lock = device_guard[device_id].lock_life(&mut token);
+        let device = &device_guard[device_id];
+        let mut life_lock = token.lock(&device.life_tracker).0;
         life_lock
             .suspected_resources
             .render_pipelines
@@ -4374,10 +4506,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) {
         let hub = B::hub(self);
         let mut token = Token::root();
-        let (pipeline_layout_guard, mut token) = hub.pipeline_layouts.read(&mut token);
 
         let error = loop {
             let (bgl_guard, mut token) = hub.bind_group_layouts.read(&mut token);
+            let (pipeline_layout_guard, mut token) = hub.pipeline_layouts.read(&mut token);
             let (_, mut token) = hub.bind_groups.read(&mut token);
             let (pipeline_guard, _) = hub.compute_pipelines.read(&mut token);
 
@@ -4429,7 +4561,8 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             }
         };
 
-        let mut life_lock = device_guard[device_id].lock_life(&mut token);
+        let device = &device_guard[device_id];
+        let mut life_lock = token.lock::<LifetimeTracker<B>>(&device.life_tracker).0;
         life_lock
             .suspected_resources
             .compute_pipelines
@@ -4594,11 +4727,19 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let mut token = Token::root();
         let (device_guard, mut token) = hub.devices.read(&mut token);
         let device = device_guard.get(device_id).map_err(|_| InvalidDevice)?;
-        device.lock_life(&mut token).triage_suspected(
+        let (mut bgl_guard, mut token) = hub.bind_group_layouts.write(&mut token);
+        let (mut buffer_guard, mut token) = hub.buffers.write(&mut token);
+        let (mut texture_guard, mut token) = hub.textures.write(&mut token);
+        let (mut trackers_guard, mut token) = token.lock(&device.trackers);
+        let (mut life_tracker, _) = token.lock(&device.life_tracker);
+        life_tracker.triage_suspected(
             &hub,
-            &device.trackers,
+            &mut *trackers_guard,
             #[cfg(feature = "trace")]
             None,
+            &mut *bgl_guard,
+            &mut *buffer_guard,
+            &mut *texture_guard,
             &mut token,
         );
         Ok(())
@@ -4611,12 +4752,32 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     ) -> Result<(), WaitIdleError> {
         let hub = B::hub(self);
         let mut token = Token::root();
+        let (device_guard, mut token) = hub.devices.read(&mut token);
+        let device = device_guard
+            .get(device_id)
+            .map_err(|_| DeviceError::Invalid)?;
         let callbacks = {
-            let (device_guard, mut token) = hub.devices.read(&mut token);
-            device_guard
-                .get(device_id)
-                .map_err(|_| DeviceError::Invalid)?
-                .maintain(&hub, force_wait, &mut token)?
+            /* let (temp_suspected_guard, mut token) = token.lock(&hub.temp_suspected); */
+            let suspected = SuspectedResources::default();
+            let (bgl_guard, mut token) = hub.bind_group_layouts.write(&mut token);
+            let (buffer_guard, mut token) = hub.buffers.write(&mut token);
+            let (texture_guard, mut token) = hub.textures.write(&mut token);
+            // NOTE: This is kind of a long time to be holding this lock, which isn't great, but
+            // this method will not need to take this lock after hubs are removed (I don't think?),
+            // so we don't bother to try to optimize this.
+            let (trackers_guard, mut token) = token.lock(&device.trackers);
+            let (queue_inner_guard, mut token) = token.lock(&device.queue);
+            device.maintain(
+                hub,
+                force_wait,
+                &suspected,
+                bgl_guard,
+                buffer_guard,
+                texture_guard,
+                trackers_guard,
+                queue_inner_guard,
+                &mut token,
+            )?
         };
         fire_map_callbacks(callbacks);
         Ok(())
@@ -4631,9 +4792,29 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         let hub = B::hub(self);
         let mut token = Token::root();
+        let suspected = SuspectedResources::default();
+        // let (temp_suspected_guard, mut token) = token.lock(&hub.temp_suspected);
         let (device_guard, mut token) = hub.devices.read(&mut token);
         for (_, device) in device_guard.iter(B::VARIANT) {
-            let cbs = device.maintain(&hub, force_wait, &mut token)?;
+            let (bgl_guard, mut token) = hub.bind_group_layouts.write(&mut token);
+            let (buffer_guard, mut token) = hub.buffers.write(&mut token);
+            let (texture_guard, mut token) = hub.textures.write(&mut token);
+            // NOTE: This is kind of a long time to be holding this lock, which isn't great, but
+            // this method will not need to take this lock after hubs are removed (I don't think?),
+            // so we don't bother to try to optimize this.
+            let (trackers_guard, mut token) = token.lock(&device.trackers);
+            let (queue_inner_guard, mut token) = token.lock(&device.queue);
+            let cbs = device.maintain(
+                &hub,
+                force_wait,
+                &suspected,
+                bgl_guard,
+                buffer_guard,
+                texture_guard,
+                trackers_guard,
+                queue_inner_guard,
+                &mut token,
+            )?;
             callbacks.extend(cbs);
         }
         Ok(())
@@ -4708,6 +4889,11 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         }
     }
 
+    /// Safety: map requests for this buffer must be synchronized with any unmap requests for the
+    /// same buffer.
+    ///
+    /// NOTE: Currently NOT marked unsafe to make it easier to integrate with the gfx_select!
+    /// macro, but it should be marked unsafe if this is backported to non-Veloren wgpu.
     pub fn buffer_map_async<B: GfxBackend>(
         &self,
         buffer_id: id::BufferId,
@@ -4737,6 +4923,12 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             check_buffer_usage(buffer.usage, pub_usage)?;
             buffer.map_state = match buffer.map_state {
                 resource::BufferMapState::Init { .. } | resource::BufferMapState::Active { .. } => {
+                    // Note: technically we should check for Init being unmapped, since the
+                    // requested usage checked above by [check_buffer_usage] might have been
+                    // MAP_READ, and a MAP_READ buffer (unlike a MAP_WRITE buffer) could be in the
+                    // Init state.  But since only Veloren is using this code and we never use
+                    // MAP_READ together with mapped_on_init, we don't care.  In any case it's not
+                    // a safety issue not to deal with this case.
                     return Err(resource::BufferAccessError::AlreadyMapped);
                 }
                 resource::BufferMapState::Waiting(_) => {
@@ -4757,20 +4949,26 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         };
 
         let device = &device_guard[device_id];
-        device.trackers.lock().buffers.change_replace(
+        token.lock(&device.trackers).0.buffers.change_replace(
             id::Valid(buffer_id),
             &ref_count,
             (),
             internal_use,
         );
 
-        device
-            .lock_life(&mut token)
+        token
+            .lock(&device.life_tracker)
+            .0
             .map(id::Valid(buffer_id), ref_count);
 
         Ok(())
     }
 
+    /// The range must not already be mapped (including from other threads).  Additionally, this
+    /// must synchronize with any calls to unmap.
+    ///
+    /// NOTE: Currently NOT marked unsafe to make it easier to integrate with the gfx_select!
+    /// macro, but it should be marked unsafe.
     pub fn buffer_get_mapped_range<B: GfxBackend>(
         &self,
         buffer_id: id::BufferId,
@@ -4803,6 +5001,14 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         match buffer.map_state {
             resource::BufferMapState::Init { ptr, .. } => {
+                // Note that this memory access cannot be outdated, because the outer
+                // function's precondition is that any unmap requests must be synchronized with
+                // any map requests for this buffer; thus, we can use Relaxed.
+                if buffer.life_guard.submission_index.load(Ordering::Relaxed) != 0 {
+                    // The buffer was actually unmapped; the state change just hasn't taken effect
+                    // yet.
+                    return Err(resource::BufferAccessError::NotMapped);
+                }
                 // offset (u64) can not be < 0, so no need to validate the lower bound
                 if offset + range_size > buffer.size {
                     return Err(resource::BufferAccessError::OutOfBoundsOverrun {
@@ -4839,7 +5045,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         }
     }
 
-    fn buffer_unmap_inner<B: GfxBackend>(
+    /// Safety: unmap requests for this buffer must be synchronized with any map requests or
+    /// calls to queue_write_buffer for the same buffer.
+    unsafe fn buffer_unmap_inner<B: GfxBackend>(
         &self,
         buffer_id: id::BufferId,
     ) -> Result<Option<BufferMapPendingCallback>, resource::BufferAccessError> {
@@ -4848,25 +5056,25 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let hub = B::hub(self);
         let mut token = Token::root();
 
-        let (mut device_guard, mut token) = hub.devices.write(&mut token);
-        let (mut buffer_guard, _) = hub.buffers.write(&mut token);
+        let (device_guard, mut token) = hub.devices.read(&mut token);
+        let (buffer_guard, mut token_) = hub.buffers.read(&mut token);
         let buffer = buffer_guard
-            .get_mut(buffer_id)
+            .get(buffer_id)
             .map_err(|_| resource::BufferAccessError::Invalid)?;
-        let device = &mut device_guard[buffer.device_id.value];
+        let device = &device_guard[buffer.device_id.value];
 
         log::debug!("Buffer {:?} map state -> Idle", buffer_id);
-        match mem::replace(&mut buffer.map_state, resource::BufferMapState::Idle) {
-            resource::BufferMapState::Init {
+        match /*mem::replace(&mut buffer.map_state, resource::BufferMapState::Idle)*/&buffer.map_state {
+            &resource::BufferMapState::Init {
                 ptr,
-                stage_buffer,
-                stage_memory,
+                ref stage_buffer,
+                ref stage_memory,
                 needs_flush,
             } => {
                 #[cfg(feature = "trace")]
                 if let Some(ref trace) = device.trace {
                     let mut trace = trace.lock();
-                    let data = trace.make_binary("bin", unsafe {
+                    let data = trace.make_binary("bin", {
                         std::slice::from_raw_parts(ptr.as_ptr(), buffer.size as usize)
                     });
                     trace.add(trace::Action::WriteBuffer {
@@ -4884,10 +5092,22 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
                 let &(ref buf_raw, _) = buffer
                     .raw
-                    .as_ref()
+                    .as_deref()
                     .ok_or(resource::BufferAccessError::Destroyed)?;
 
-                buffer.life_guard.use_at(device.active_submission_index + 1);
+                // NOTE: nonzero use_at implies map_on_init succeeded.  Since the Init state can
+                // only be entered at creation time, which obviously can only happen once, we
+                // know that this has *definitely* never been unmapped before, iff the buffer's
+                // current submission index is still 0.  Note that this load can use Relaxed
+                // ordering because unmap requests must synchronize with any map requests on this
+                // buffer thanks to the function precondition, so we do not need to rely on the
+                // queue being locked.
+                if buffer.life_guard.submission_index.load(Ordering::Relaxed) != 0 {
+                    // As described above, we are actually idle.
+                    return Err(resource::BufferAccessError::NotMapped);
+                }
+
+                // Since we're definitely the unique unmapper, start performing the buffer write.
                 let region = hal::command::BufferCopy {
                     src: 0,
                     dst: 0,
@@ -4895,7 +5115,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                 };
                 let transition_src = hal::memory::Barrier::Buffer {
                     states: hal::buffer::Access::HOST_WRITE..hal::buffer::Access::TRANSFER_READ,
-                    target: &stage_buffer,
+                    target: stage_buffer,
                     range: hal::buffer::SubRange::WHOLE,
                     families: None,
                 };
@@ -4905,39 +5125,61 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                     range: hal::buffer::SubRange::WHOLE,
                     families: None,
                 };
-                unsafe {
-                    let cmdbuf = device.borrow_pending_writes();
-                    cmdbuf.pipeline_barrier(
-                        hal::pso::PipelineStage::HOST..hal::pso::PipelineStage::TRANSFER,
-                        hal::memory::Dependencies::empty(),
-                        iter::once(transition_src).chain(iter::once(transition_dst)),
-                    );
-                    if buffer.size > 0 {
-                        cmdbuf.copy_buffer(&stage_buffer, buf_raw, iter::once(region));
-                    }
+
+                // Since the queue is locked, we can be confident that the submission index is
+                // accurate and not being modified.
+                let (mut queue_inner_guard, _) = token_.lock(&device.queue);
+                buffer.life_guard.use_at(queue_inner_guard.active_submission_index + 1);
+                let cmdbuf = queue_inner_guard.pending_writes.borrow_cmd_buf(&device.cmd_allocator);
+                cmdbuf.pipeline_barrier(
+                    hal::pso::PipelineStage::HOST..hal::pso::PipelineStage::TRANSFER,
+                    hal::memory::Dependencies::empty(),
+                    iter::once(transition_src).chain(iter::once(transition_dst)),
+                );
+                if buffer.size > 0 {
+                    cmdbuf.copy_buffer(&stage_buffer, buf_raw, iter::once(region));
                 }
-                device
-                    .pending_writes
-                    .consume_temp(queue::TempResource::Buffer(stage_buffer), stage_memory);
-                device.pending_writes.dst_buffers.insert(buffer_id);
+                queue_inner_guard.pending_writes
+                    .consume_temp(/*queue::TempResource::Buffer(stage_buffer), stage_memory*/id::Valid(buffer_id));
+                queue_inner_guard.pending_writes.dst_buffers.insert(buffer_id);
             }
             resource::BufferMapState::Idle => {
                 return Err(resource::BufferAccessError::NotMapped);
             }
-            resource::BufferMapState::Waiting(pending) => {
-                return Ok(Some((pending.op, resource::BufferMapAsyncStatus::Aborted)));
+            resource::BufferMapState::Waiting(..) => {
+                // This case becomes slower since we have to take the write lock and recheck, but
+                // aborting pending writes should be rare so this is acceptable for now.
+                drop((buffer_guard, token_));
+                let (mut buffer_guard, _) = hub.buffers.write(&mut token);
+                let buffer = buffer_guard
+                    .get_mut(buffer_id)
+                    .map_err(|_| resource::BufferAccessError::Invalid)?;
+                // Fortunately, nobody else can remap the buffer in the meantime since any
+                // map has to synchronize with any unmap, so we know we're either still Waiting, or
+                // Idle.
+                match mem::replace(&mut buffer.map_state, resource::BufferMapState::Idle) {
+                    resource::BufferMapState::Waiting(pending) => {
+                        return Ok(Some((pending.op, resource::BufferMapAsyncStatus::Aborted)));
+                    },
+                    _ => {
+                        return Err(resource::BufferAccessError::NotMapped);
+                    },
+                }
             }
-            resource::BufferMapState::Active {
+            &resource::BufferMapState::Active {
                 ptr,
-                sub_range,
+                ref sub_range,
                 host,
             } => {
+                // Since this synchronizes with any calls to map or get_mapped_range, we don't
+                // actually have to borrow the buffer mutably until the very end, when we change
+                // its state to Idle.
                 if host == HostMap::Write {
                     #[cfg(feature = "trace")]
                     if let Some(ref trace) = device.trace {
                         let mut trace = trace.lock();
                         let size = sub_range.size_to(buffer.size);
-                        let data = trace.make_binary("bin", unsafe {
+                        let data = trace.make_binary("bin", {
                             std::slice::from_raw_parts(ptr.as_ptr(), size as usize)
                         });
                         trace.add(trace::Action::WriteBuffer {
@@ -4950,17 +5192,58 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                     let _ = (ptr, sub_range);
                 }
                 unmap_buffer(&device.raw, buffer)?;
+                drop((buffer_guard, token_));
+                let (mut buffer_guard, _) = hub.buffers.write(&mut token);
+                let buffer = buffer_guard
+                    .get_mut(buffer_id)
+                    .map_err(|_| resource::BufferAccessError::Invalid)?;
+                // Fortunately, nobody else can remap the buffer in the meantime since any
+                // map has to synchronize with any unmap, so we know we're either still Active, or
+                // Idle.
+                match mem::replace(&mut buffer.map_state, resource::BufferMapState::Idle) {
+                    resource::BufferMapState::Active { .. } => {
+                        // The buffer might have been destroyed in the interim, so we make sure to
+                        // check for that.  Since we synchronize with calls to queue_write_buffer,
+                        // we know we are the unique owner here.
+                        //
+                        // NOTE: We do *not* dereference the actual B::Buffer mutably, as it may be
+                        // shared when we call here.
+                        let block = &mut buffer.raw.as_deref_mut()
+                            .ok_or(resource::BufferAccessError::Destroyed)?
+                            .1;
+                        // Safety: Since any calls to buffer_unmap_inner need to take the
+                        // buffer mutably at this point, and they always change its state to Idle,
+                        // we know there were no such concurrent calls.  The only other time that a
+                        // buffer gets unmapped is when a command buffer contains a reference to a
+                        // buffer that was unmapped, but this can't happen here because you need a
+                        // reference to the buffer to even be able to call this function, which
+                        // should still be alive.  So, we can assume the buffer is still mapped,
+                        // and unmap it, since the state was Idle.
+                        buffer.sync_mapped_writes = None;
+                        block.unmap(&device.raw);
+                    },
+                    _ => {
+                        return Err(resource::BufferAccessError::NotMapped);
+                    },
+                }
             }
         }
         Ok(None)
     }
 
+    /// Safety: unmap requests for this buffer must be synchronized with any map requests for the
+    /// same buffer.
+    ///
+    /// NOTE: Currently NOT marked unsafe to make it easier to integrate with the gfx_select!
+    /// macro, but it should be marked unsafe.
     pub fn buffer_unmap<B: GfxBackend>(
         &self,
         buffer_id: id::BufferId,
     ) -> Result<(), resource::BufferAccessError> {
-        self.buffer_unmap_inner::<B>(buffer_id)
-            //Note: outside inner function so no locks are held when calling the callback
-            .map(|pending_callback| fire_map_callbacks(pending_callback.into_iter()))
+        unsafe {
+            self.buffer_unmap_inner::<B>(buffer_id)
+                //Note: outside inner function so no locks are held when calling the callback
+                .map(|pending_callback| fire_map_callbacks(pending_callback.into_iter()))
+        }
     }
 }

@@ -171,7 +171,7 @@ pub type BufferDescriptor<'a> = wgt::BufferDescriptor<Label<'a>>;
 
 #[derive(Debug)]
 pub struct Buffer<B: hal::Backend> {
-    pub(crate) raw: Option<(B::Buffer, MemoryBlock<B>)>,
+    pub(crate) raw: Option<Box<(B::Buffer, MemoryBlock<B>)>>,
     pub(crate) device_id: Stored<DeviceId>,
     pub(crate) usage: wgt::BufferUsage,
     pub(crate) size: wgt::BufferAddress,
@@ -213,7 +213,7 @@ pub type TextureDescriptor<'a> = wgt::TextureDescriptor<Label<'a>>;
 
 #[derive(Debug)]
 pub struct Texture<B: hal::Backend> {
-    pub(crate) raw: Option<(B::Image, MemoryBlock<B>)>,
+    pub(crate) raw: Option<Box<(B::Image, MemoryBlock<B>)>>,
     pub(crate) device_id: Stored<DeviceId>,
     pub(crate) usage: wgt::TextureUsage,
     pub(crate) aspects: hal::format::Aspects,

@@ -12,7 +12,10 @@ use crate::{
     resource, Epoch, FastHashMap, Index, RefCount,
 };
 
-use std::{collections::hash_map::Entry, fmt, marker::PhantomData, ops, vec::Drain};
+use std::{
+    collections::hash_map::Entry, fmt, marker::PhantomData, mem, ops,
+    /*vec::Drain*/ vec::IntoIter as Drain,
+};
 use thiserror::Error;
 
 pub(crate) use buffer::BufferState;
@@ -128,10 +131,10 @@ impl PendingTransition<BufferState> {
     /// Produce the gfx-hal barrier corresponding to the transition.
     pub fn into_hal<'a, B: hal::Backend>(
         self,
-        buf: &'a resource::Buffer<B>,
+        /*buf*/ target: &'a /*resource::Buffer<B>*/ B::Buffer,
     ) -> hal::memory::Barrier<'a, B> {
         log::trace!("\tbuffer -> {:?}", self);
-        let &(ref target, _) = buf.raw.as_ref().expect("Buffer is destroyed");
+        /* let &(ref target, _) = buf.raw.as_ref().expect("Buffer is destroyed"); */
         hal::memory::Barrier::Buffer {
             states: conv::map_buffer_state(self.usage.start)
                 ..conv::map_buffer_state(self.usage.end),
@@ -155,11 +158,12 @@ impl PendingTransition<TextureState> {
     /// Produce the gfx-hal barrier corresponding to the transition.
     pub fn into_hal<'a, B: hal::Backend>(
         self,
-        tex: &'a resource::Texture<B>,
+        /*tex*/ target: &'a /*resource::Texture<B>*/ B::Image,
+        aspects: hal::format::Aspects,
     ) -> hal::memory::Barrier<'a, B> {
         log::trace!("\ttexture -> {:?}", self);
-        let &(ref target, _) = tex.raw.as_ref().expect("Texture is destroyed");
-        let aspects = tex.aspects;
+        // let &(ref target, _) = tex.raw.as_ref().expect("Texture is destroyed");
+        // let aspects = tex.aspects;
         hal::memory::Barrier::Image {
             states: conv::map_texture_state(self.usage.start, aspects)
                 ..conv::map_texture_state(self.usage.end, aspects),
@@ -378,7 +382,8 @@ impl<S: ResourceState> ResourceTracker<S> {
         res.state
             .change(id, selector, usage, Some(&mut self.temp))
             .ok(); //TODO: unwrap?
-        self.temp.drain(..)
+        mem::replace(&mut self.temp, Vec::new()).into_iter()
+        /* self.temp.drain(..) */
     }
 
     /// Replace the usage of a specified already tracked resource.
@@ -393,7 +398,7 @@ impl<S: ResourceState> ResourceTracker<S> {
         res.state
             .change(id, selector, usage, Some(&mut self.temp))
             .ok();
-        self.temp.drain(..)
+        mem::replace(&mut self.temp /*.drain(..)*/, Vec::new()).into_iter()
     }
 
     /// Turn the tracking from the "expand" mode into the "replace" one,
@@ -458,7 +463,8 @@ impl<S: ResourceState> ResourceTracker<S> {
                 }
             }
         }
-        self.temp.drain(..)
+        mem::replace(&mut self.temp, Vec::new()) /*.drain(..)*/
+            .into_iter()
     }
 
     /// Use a given resource provided by an `Id` with the specified usage.
