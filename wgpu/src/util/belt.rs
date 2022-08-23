@@ -166,7 +166,7 @@ impl StagingBelt {
             .drain(..)
             .map(|mut chunk| {
                 let sender = sender.clone();
-                let async_buffer = chunk.buffer.slice(..).map_async(MapMode::Write);
+                let async_buffer = chunk.buffer.slice_mut(..).map_async(MapMode::Write);
 
                 Some(async move {
                     // The result is ignored

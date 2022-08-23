@@ -90,7 +90,7 @@ impl DownloadBuffer {
         let command_buffer: super::CommandBuffer = encoder.finish();
         queue.submit(Some(command_buffer));
 
-        let fut = download.slice(..).map_async(super::MapMode::Read);
+        let fut = download.slice_mut(..).map_async(super::MapMode::Read);
         async move {
             fut.await?;
             let mapped_range = unsafe {

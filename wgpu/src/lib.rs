@@ -597,6 +597,18 @@ pub struct Buffer {
 /// `buffer.slice(..)`
 #[derive(Debug)]
 pub struct BufferSlice<'a> {
+    buffer: &'a Buffer,
+    offset: BufferAddress,
+    size: Option<BufferSize>,
+}
+
+/// Mutable slice into a [`Buffer`].
+///
+/// Created by calling [`Buffer::slice_mut`]. To use the whole buffer, call with unbounded slice:
+///
+/// `buffer.slice(..)`
+#[derive(Debug)]
+pub struct BufferSliceMut<'a> {
     buffer: &'a mut Buffer,
     offset: BufferAddress,
     size: Option<BufferSize>,
@@ -1785,14 +1797,14 @@ trait BufferMappedRangeSlice {
 /// Read only view into a mapped buffer.
 #[derive(Debug)]
 pub struct BufferView<'a> {
-    slice: &'a BufferSlice<'a>,
+    slice: &'a BufferSliceMut<'a>,
     data: BufferMappedRange,
 }
 
 /// Write only view into mapped buffer.
 #[derive(Debug)]
 pub struct BufferViewMut<'a> {
-    slice: &'a BufferSlice<'a>,
+    slice: &'a BufferSliceMut<'a>,
     data: BufferMappedRange,
     readable: bool,
 }
@@ -1871,9 +1883,21 @@ impl Buffer {
 
     /// Use only a portion of this Buffer for a given operation. Choosing a range with no end
     /// will use the rest of the buffer. Using a totally unbounded range will use the entire buffer.
-    pub fn slice<S: RangeBounds<BufferAddress>>(&mut self, bounds: S) -> BufferSlice {
+    pub fn slice<S: RangeBounds<BufferAddress>>(&self, bounds: S) -> BufferSlice {
         let (offset, size) = range_to_offset_size(bounds);
         BufferSlice {
+            buffer: self,
+            offset,
+            size,
+        }
+    }
+
+    /// Use only a portion of this Buffer for a given memory mapping operation. Choosing a range
+    /// with no end will use the rest of the buffer. Using a totally unbounded range will use the
+    /// entire buffer.
+    pub fn slice_mut<S: RangeBounds<BufferAddress>>(&mut self, bounds: S) -> BufferSliceMut {
+        let (offset, size) = range_to_offset_size(bounds);
+        BufferSliceMut {
             map_context: RefCell::new(MapContext {
                 total_size: self.map_context.total_size,
                 initial_range: self.map_context.initial_range.clone(),
@@ -1906,8 +1930,14 @@ impl Buffer {
     }
 }
 
-impl<'a> BufferSlice<'a> {
-    //TODO: fn slice(&self) -> Self
+impl<'a> BufferSliceMut<'a> {
+    pub fn slice(&self) -> BufferSlice {
+        BufferSlice {
+            buffer: self.buffer,
+            offset: self.offset,
+            size: self.size,
+        }
+    }
 
     /// Map the buffer. Buffer is ready to map once the future is resolved.
     ///
@@ -1963,7 +1993,7 @@ impl<'a> BufferSlice<'a> {
     }
 
     /// Synchronously and immediately map a buffer for writing. If the buffer is not immediately mappable
-    /// through [`BufferDescriptor::mapped_at_creation`] or [`BufferSlice::map_async`], will panic.
+    /// through [`BufferDescriptor::mapped_at_creation`] or [`BufferSliceMut::map_async`], will panic.
     pub fn get_mapped_range_mut<'b>(&'b self) -> BufferViewMut<'b> {
         let data = unsafe {
             let mut guard = self.map_context.borrow_mut();
