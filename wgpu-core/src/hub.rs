@@ -6,7 +6,7 @@ use crate::{
     backend,
     binding_model::{BindGroup, BindGroupLayout, PipelineLayout},
     command::{CommandBuffer, RenderBundle},
-    device::{Device, LifetimeTracker, QueueInner, SuspectedResources, Trackers},
+    device::{Device, DropTrackers, LifetimeTracker, QueueInner, SuspectedResources, Trackers},
     id::{
         AdapterId, BindGroupId, BindGroupLayoutId, BufferId, CommandBufferId, ComputePipelineId,
         DeviceId, PipelineLayoutId, RenderBundleId, RenderPipelineId, SamplerId, ShaderModuleId,
@@ -303,32 +303,44 @@ impl<B: hal::Backend> Access<Buffer<B>> for Root {}
 impl<B: hal::Backend> Access<Buffer<B>> for SuspectedResources {}
 impl<B: hal::Backend> Access<Buffer<B>> for Device<B> {}
 impl<B: hal::Backend> Access<Buffer<B>> for BindGroupLayout<B> {}
-impl<B: hal::Backend> Access<Texture<B>> for Root {}
-impl<B: hal::Backend> Access<Texture<B>> for Device<B> {}
-impl<B: hal::Backend> Access<Texture<B>> for Buffer<B> {}
-impl Access<Trackers /*<B>*/> for Root {}
-impl<B: hal::Backend> Access<Trackers /*<B>*/> for Device<B> {}
-impl<B: hal::Backend> Access<Trackers /*<B>*/> for BindGroupLayout<B> {}
-impl<B: hal::Backend> Access<Trackers /*<B>*/> for Buffer<B> {}
-impl<B: hal::Backend> Access<Trackers /*<B>*/> for Texture<B> {}
 impl<B: hal::Backend> Access<QueueInner<B>> for Root {}
 impl<B: hal::Backend> Access<QueueInner<B>> for Surface {}
 impl<B: hal::Backend> Access<QueueInner<B>> for Device<B> {}
 impl<B: hal::Backend> Access<QueueInner<B>> for SwapChain<B> {}
+impl<B: hal::Backend> Access<QueueInner<B>> for BindGroupLayout<B> {}
 impl<B: hal::Backend> Access<QueueInner<B>> for Buffer<B> {}
-impl<B: hal::Backend> Access<QueueInner<B>> for Texture<B> {}
-impl<B: hal::Backend> Access<QueueInner<B>> for Trackers /*<B>*/ {}
+impl<B: hal::Backend> Access<Texture<B>> for Root {}
+impl<B: hal::Backend> Access<Texture<B>> for Device<B> {}
+impl<B: hal::Backend> Access<Texture<B>> for Buffer<B> {}
+impl<B: hal::Backend> Access<Texture<B>> for QueueInner<B> {}
+impl Access<Trackers /*<B>*/> for Root {}
+impl<B: hal::Backend> Access<Trackers /*<B>*/> for Device<B> {}
+impl<B: hal::Backend> Access<Trackers /*<B>*/> for BindGroupLayout<B> {}
+impl<B: hal::Backend> Access<Trackers /*<B>*/> for Buffer<B> {}
+impl<B: hal::Backend> Access<Trackers /*<B>*/> for QueueInner<B> {}
+impl<B: hal::Backend> Access<Trackers /*<B>*/> for Texture<B> {}
+impl<B: hal::Backend> Access<DropTrackers<B>> for Root {}
+impl<B: hal::Backend> Access<DropTrackers<B>> for Surface {}
+impl<B: hal::Backend> Access<DropTrackers<B>> for Device<B> {}
+impl<B: hal::Backend> Access<DropTrackers<B>> for SwapChain<B> {}
+impl<B: hal::Backend> Access<DropTrackers<B>> for Buffer<B> {}
+impl<B: hal::Backend> Access<DropTrackers<B>> for QueueInner<B> {}
+impl<B: hal::Backend> Access<DropTrackers<B>> for Texture<B> {}
+impl<B: hal::Backend> Access<DropTrackers<B>> for Trackers /*<B>*/ {}
 impl<B: hal::Backend> Access<LifetimeTracker<B>> for SuspectedResources {}
 impl<B: hal::Backend> Access<LifetimeTracker<B>> for Root {}
 impl<B: hal::Backend> Access<LifetimeTracker<B>> for Device<B> {}
+/* impl<B: hal::Backend> Access<LifetimeTracker<B>> for QueueInner<B> {} */
 impl<B: hal::Backend> Access<LifetimeTracker<B>> for Trackers /*<B>*/ {}
-impl<B: hal::Backend> Access<LifetimeTracker<B>> for QueueInner<B> {}
+impl<B: hal::Backend> Access<LifetimeTracker<B>> for DropTrackers<B> {}
 impl<B: hal::Backend> Access<CommandBuffer<B>> for Root {}
 impl<B: hal::Backend> Access<CommandBuffer<B>> for Device<B> {}
 impl<B: hal::Backend> Access<CommandBuffer<B>> for SwapChain<B> {}
+// impl<B: hal::Backend> Access<CommandBuffer<B>> for QueueInner<B> {} //TODO: remove this (only used in `submit()`)
 impl<B: hal::Backend> Access<CommandBuffer<B>> for Buffer<B> {}
 impl<B: hal::Backend> Access<CommandBuffer<B>> for Texture<B> {}
-impl<B: hal::Backend> Access<CommandBuffer<B>> for QueueInner<B> {} //TODO: remove this (only used in `submit()`)
+impl<B: hal::Backend> Access<CommandBuffer<B>> for Trackers {} //TODO: remove this (only used in `submit()`)
+impl<B: hal::Backend> Access<CommandBuffer<B>> for DropTrackers<B> {} //TODO: remove this (only used in `submit()`)
 impl<B: hal::Backend> Access<RenderBundle> for Device<B> {}
 impl<B: hal::Backend> Access<RenderBundle> for LifetimeTracker<B> {}
 impl<B: hal::Backend> Access<RenderBundle> for CommandBuffer<B> {}

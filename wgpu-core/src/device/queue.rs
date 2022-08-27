@@ -35,18 +35,21 @@ pub enum TempResource<B: hal::Backend> {
 }
 
 #[derive(Debug)]
-pub(crate) struct PendingWrites<B: hal::Backend> {
-    pub command_buffer: Option<B::CommandBuffer>,
+pub(crate) struct DropTrackers<B: hal::Backend> {
     pub temp_resources: Vec<(TempResource<B>, alloc::MemoryBlock<B>)>,
     pub temp_buffer_resources: Vec<id::Valid<id::BufferId>>,
     pub dst_buffers: FastHashSet<id::BufferId>,
     pub dst_textures: FastHashSet<id::TextureId>,
 }
 
-impl<B: hal::Backend> PendingWrites<B> {
+#[derive(Debug)]
+pub(crate) struct PendingWrites<B: hal::Backend> {
+    pub command_buffer: Option<B::CommandBuffer>,
+}
+
+impl<B: hal::Backend> DropTrackers<B> {
     pub fn new() -> Self {
         Self {
-            command_buffer: None,
             temp_resources: Vec::new(),
             temp_buffer_resources: Vec::new(),
             dst_buffers: FastHashSet::default(),
@@ -54,8 +57,25 @@ impl<B: hal::Backend> PendingWrites<B> {
         }
     }
 
+    pub fn consume_temp(
+        &mut self,
+        resource: id::Valid<id::BufferId>, /*TempResource<B>, memory: alloc::MemoryBlock<B>*/
+    ) {
+        self.temp_buffer_resources
+            .push(/*(resource, memory)*/ resource);
+    }
+}
+
+impl<B: hal::Backend> PendingWrites<B> {
+    pub fn new() -> Self {
+        Self {
+            command_buffer: None,
+        }
+    }
+
     pub fn dispose(
         self,
+        drop_trackers: DropTrackers<B>,
         device: &B::Device,
         cmd_allocator: &CommandAllocator<B>,
         mem_allocator: &mut alloc::MemoryAllocator<B>,
@@ -63,7 +83,7 @@ impl<B: hal::Backend> PendingWrites<B> {
         if let Some(raw) = self.command_buffer {
             cmd_allocator.discard_internal(raw);
         }
-        for (resource, memory) in self.temp_resources {
+        for (resource, memory) in drop_trackers.temp_resources {
             mem_allocator.free(device, memory);
             match resource {
                 TempResource::Buffer(buffer) => unsafe {
@@ -78,24 +98,22 @@ impl<B: hal::Backend> PendingWrites<B> {
         // buffers are destroyed.
     }
 
-    pub fn consume_temp(
+    fn consume(
         &mut self,
-        resource: id::Valid<id::BufferId>, /*TempResource<B>, memory: alloc::MemoryBlock<B>*/
+        trackers: &mut DropTrackers<B>,
+        stage: StagingData<B>,
+        cmdbuf: B::CommandBuffer,
     ) {
-        self.temp_buffer_resources
-            .push(/*(resource, memory)*/ resource);
-    }
-
-    fn consume(&mut self, stage: StagingData<B>, cmdbuf: B::CommandBuffer) {
-        self.temp_resources
+        trackers
+            .temp_resources
             .push((TempResource::Buffer(stage.buffer), stage.memory));
         self.command_buffer = Some(cmdbuf);
     }
 
     #[must_use]
-    fn finish(&mut self) -> Option<B::CommandBuffer> {
-        self.dst_buffers.clear();
-        self.dst_textures.clear();
+    fn finish(&mut self, trackers: &mut DropTrackers<B>) -> Option<B::CommandBuffer> {
+        trackers.dst_buffers.clear();
+        trackers.dst_textures.clear();
         self.command_buffer.take().map(|mut cmd_buf| unsafe {
             cmd_buf.finish();
             cmd_buf
@@ -198,13 +216,14 @@ impl<B: hal::Backend> super::Device<B> {
 
     fn initialize_buffer_memory(
         pending_writes: &mut PendingWrites<B>,
+        drop_trackers: &mut DropTrackers<B>,
         mut required_buffer_inits: RequiredBufferInits,
         trackers: &mut crate::device::Trackers,
         buffer_guard: &mut Storage<Buffer<B>, id::BufferId>,
         cmd_allocator: &CommandAllocator<B>,
     ) -> Result<(), QueueSubmitError> {
         /*self.*/
-        pending_writes
+        drop_trackers
             .dst_buffers
             .extend(required_buffer_inits.map.keys());
 
@@ -337,40 +356,19 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let mut stage = device.prepare_stage(data_size)?;
         stage.memory.write_bytes(&device.raw, 0, data)?;
 
-        let (buffer_guard, mut token1) = hub.buffers.read(&mut token);
-        let (mut trackers, token2) = token1.lock(&device.trackers);
-        let (dst, transition) = trackers
-            .buffers
-            .use_replace(&*buffer_guard, buffer_id, (), BufferUse::COPY_DST)
-            .map_err(TransferError::InvalidBuffer)?;
-        drop((trackers, token2));
-        let &(ref dst_raw, _) = dst
-            .raw
-            .as_deref()
-            .ok_or(TransferError::InvalidBuffer(buffer_id))?;
-        let &Buffer {
+        let (mut buffer_guard, mut /*token1*/ token1) = hub.buffers.write(&mut token);
+        let dst = buffer_guard
+            .get_mut(buffer_id)
+            .map_err(|_| TransferError::InvalidBuffer(buffer_id))?;
+
+        let &mut Buffer {
             usage,
             size,
             ref map_state,
             ref life_guard,
+            ref mut initialization_status,
             ..
         } = dst;
-        // NOTE: Since we synchronize with unmap on this buffer, and also with the part of
-        // queue_submit that calls [use_at] on buffers (which takes buffers mutably), we
-        // know nobody else is concurrently modifying the submission index when we read it
-        // here.
-        let old_submission_index = life_guard.submission_index.load(Ordering::Relaxed);
-        if matches!(map_state, BufferMapState::Init { .. }) && old_submission_index == 0 {
-            // We have an unmapped map-on-init buffer.  Currently this means we always reject
-            // writes until it's unmapped.  Since we synchronize with unmap, this is not racy.
-            return Err(TransferError::InvalidBuffer(buffer_id).into());
-        }
-        // Safety: For the buffer to be deallocated, it must be unregistered.  All methods that
-        // unregister the buffer, either require &mut on the device, or first require dropping
-        // or destroying the buffer, which can't happen until we return due to the precondition
-        // on this function.
-        let dst_raw: &'a B::Buffer = unsafe { mem::transmute(dst_raw) };
-        drop((buffer_guard, token1));
 
         if !usage.contains(wgt::BufferUsage::COPY_DST) {
             return Err(TransferError::MissingCopyDstUsageFlag(Some(buffer_id), None).into());
@@ -392,6 +390,49 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .into());
         }
 
+        let &(ref dst_raw, _) = dst
+            .raw
+            .as_deref()
+            .ok_or(TransferError::InvalidBuffer(buffer_id))?;
+
+        let (mut queue_inner_guard, mut token_) = token1.lock(&device.queue);
+        // NOTE: Since we synchronize with unmap on this buffer, and also with the part of
+        // queue_submit that calls [use_at] on buffers (which takes buffers mutably), we
+        // know nobody else is concurrently modifying the submission index when we read it
+        // here.
+        let old_submission_index = life_guard.submission_index.load(Ordering::Relaxed);
+        if matches!(map_state, BufferMapState::Init { .. }) && old_submission_index == 0 {
+            // We have an unmapped map-on-init buffer.  Currently this means we always reject
+            // writes until it's unmapped.  Since we synchronize with unmap, this is not racy.
+            return Err(TransferError::InvalidBuffer(buffer_id).into());
+        }
+
+        initialization_status.clear(buffer_offset..(buffer_offset + data_size));
+        // NOTE: Since buffers is taken by at least read lock, we know the submission index is
+        // not being updated by a call to queue_submit (which mutably locks hub.buffers).
+        // Since we reject writes to currently mapped mapped-on-init buffers, and unmap
+        // synchronizes with queue_write_buffer, we also know that the submission index is not
+        // being updated by a call to queue_write_buffer.  Therefore, we can assume nobody else
+        // is updating the submission index concurrently, so we just need to check whether the
+        // current submission index is already higher than the one we want to use.
+        let submission_index = queue_inner_guard.active_submission_index + 1;
+        /* let old_submission_index = dst.life_guard.submission_index.load(Ordering::Relaxed); */
+        if old_submission_index < submission_index {
+            dst.life_guard.use_at(submission_index);
+        }
+        // Safety: For the buffer to be deallocated, it must be unregistered.  All methods that
+        // unregister the buffer, either require &mut on the device, or first require dropping
+        // or destroying the buffer, which can't happen until we return due to the precondition
+        // on this function.
+        let dst_raw: &'a B::Buffer = unsafe { mem::transmute(dst_raw) };
+        let (mut trackers, token2) = token_.lock(&device.trackers);
+        let (dst, transition) = trackers
+            .buffers
+            .use_replace(&*buffer_guard, buffer_id, (), BufferUse::COPY_DST)
+            .map_err(TransferError::InvalidBuffer)?;
+        drop((trackers, token2));
+        drop(buffer_guard);
+
         let region = hal::command::BufferCopy {
             src: 0,
             dst: buffer_offset,
@@ -400,14 +441,15 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         // NOTE: submission_index is a lower bound approximation on the actual submission index,
         // since we relock mutably later on.
-        let submission_index = {
-            let (mut queue_inner_guard, _) = /*token1*/token.lock(&device.queue);
+        /*let submission_index = */
+        {
             /* // NOTE: Must wait until the pending writes are locked to assign a submission index, to
             // make sure we don't miss the scheduled writes.
             dst.life_guard
                 .use_at(queue_inner_guard.active_submission_index + 1); */
-            let pending_writes = &mut queue_inner_guard.pending_writes;
-            let mut cmdbuf = device.post_prepare_stage_raw(pending_writes);
+            let mut cmdbuf = device.post_prepare_stage_raw(
+                /*pending_writes*/ &mut queue_inner_guard.pending_writes,
+            );
             unsafe {
                 cmdbuf.pipeline_barrier(
                     super::all_buffer_stages()..hal::pso::PipelineStage::TRANSFER,
@@ -422,13 +464,18 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                 );
                 cmdbuf.copy_buffer(&stage.buffer, dst_raw, iter::once(region));
             };
-            pending_writes.consume(stage, cmdbuf);
+            let (mut /*queue_inner_guard*/drop_trackers_guard, _) = /*token1*/token_.lock(&device./*queue*/drop_trackers);
+            let pending_writes = &mut */*queue_inner_guard.pending_writes*/drop_trackers_guard;
+            queue_inner_guard
+                .pending_writes
+                .consume(pending_writes, stage, cmdbuf);
             pending_writes.dst_buffers.insert(buffer_id);
-            queue_inner_guard.active_submission_index + 1
         };
+        drop((queue_inner_guard, token_));
+        drop(token1);
 
         // Ensure the overwritten bytes are marked as initialized so they don't need to be nulled prior to mapping or binding.
-        {
+        /* {
             /* drop((buffer_guard, token1)); */
             let (mut buffer_guard, _) = hub.buffers.write(&mut token);
             let dst = buffer_guard.get_mut(buffer_id).unwrap();
@@ -447,7 +494,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             if old_submission_index < submission_index {
                 dst.life_guard.use_at(submission_index);
             }
-        }
+        } */
 
         Ok(())
     }
@@ -473,6 +520,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let device = device_guard
             .get(queue_id)
             .map_err(|_| DeviceError::Invalid)?;
+        let (mut queue_inner_guard, mut token) = /*token1*/token.lock(&device.queue);
         let (texture_guard, mut token1) = hub.textures.read(&mut token);
         // TODO: Do most of this without the texture read lock taken.
         let (image_layers, image_range, image_offset) =
@@ -495,11 +543,21 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             return Ok(());
         }
 
-        let texture_format = texture_guard.get(destination.texture).unwrap().format;
+        let dst = texture_guard.get(destination.texture).unwrap();
+        let &Texture {
+            usage,
+            aspects,
+            dimension,
+            kind,
+            format: texture_format,
+            ..
+        } = dst;
+
         let bytes_per_block = conv::map_texture_format(texture_format, device.private_features)
             .surface_desc()
             .bits as u32
             / BITS_PER_BYTE;
+
         validate_linear_texture_data(
             data_layout,
             texture_format,
@@ -510,13 +568,57 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             false,
         )?;
 
+        if !conv::is_valid_copy_dst_texture_format(texture_format) {
+            return Err(TransferError::CopyToForbiddenTextureFormat(texture_format).into());
+        }
+
+        if !usage.contains(wgt::TextureUsage::COPY_DST) {
+            return Err(
+                TransferError::MissingCopyDstUsageFlag(None, Some(destination.texture)).into(),
+            );
+        }
+        validate_texture_copy_range(
+            destination,
+            texture_format,
+            kind,
+            CopySide::Destination,
+            size,
+        )?;
+
+        let (mut trackers, token2) = token1 /*token*/
+            .lock(&device.trackers);
+        /* let (/*dst*/_, transition) = trackers
+        .textures
+        .use_replace(
+            &*texture_guard,
+            destination.texture,
+            image_range,
+            TextureUse::COPY_DST,
+        )
+        .unwrap(); */
+        let transition = trackers.textures.change_replace(
+            id::Valid(destination.texture),
+            dst.life_guard.ref_count.as_ref().unwrap(),
+            image_range,
+            TextureUse::COPY_DST,
+        );
+        drop((trackers, token2 /*token*/));
+
+        let &(ref dst_raw, _) = dst
+            .raw
+            .as_deref()
+            .ok_or(TransferError::InvalidTexture(destination.texture))?;
+        // Safety: For the texture to be deallocated, it must be unregistered.  All methods that
+        // unregister the texture, either require &mut on the device, or first require dropping
+        // or destroying the texture, which can't happen until we return due to the precondition
+        // on this function.
+        let dst_raw: &'a B::Image = unsafe { mem::transmute(dst_raw) };
+        drop((texture_guard, token1));
+
         let (block_width, block_height) = texture_format.describe().block_dimensions;
         let block_width = block_width as u32;
         let block_height = block_height as u32;
 
-        if !conv::is_valid_copy_dst_texture_format(texture_format) {
-            return Err(TransferError::CopyToForbiddenTextureFormat(texture_format).into());
-        }
         let width_blocks = size.width / block_width;
         let height_blocks = size.height / block_width;
 
@@ -537,51 +639,8 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let block_rows_in_copy =
             (size.depth_or_array_layers - 1) * block_rows_per_image + height_blocks;
         let stage_size = stage_bytes_per_row as u64 * block_rows_in_copy as u64;
+
         let mut stage = device.prepare_stage(stage_size)?;
-
-        let (mut trackers, token2) = token1.lock(&device.trackers);
-        let (dst, transition) = trackers
-            .textures
-            .use_replace(
-                &*texture_guard,
-                destination.texture,
-                image_range,
-                TextureUse::COPY_DST,
-            )
-            .unwrap();
-        drop((trackers, token2));
-        let &Texture {
-            usage,
-            aspects,
-            dimension,
-            kind,
-            format: texture_format,
-            ..
-        } = dst;
-        let &(ref dst_raw, _) = dst
-            .raw
-            .as_deref()
-            .ok_or(TransferError::InvalidTexture(destination.texture))?;
-
-        // Safety: For the texture to be deallocated, it must be unregistered.  All methods that
-        // unregister the texture, either require &mut on the device, or first require dropping
-        // or destroying the texture, which can't happen until we return due to the precondition
-        // on this function.
-        let dst_raw: &'a B::Image = unsafe { mem::transmute(dst_raw) };
-        drop((texture_guard, token1));
-
-        if !usage.contains(wgt::TextureUsage::COPY_DST) {
-            return Err(
-                TransferError::MissingCopyDstUsageFlag(None, Some(destination.texture)).into(),
-            );
-        }
-        validate_texture_copy_range(
-            destination,
-            texture_format,
-            kind,
-            CopySide::Destination,
-            size,
-        )?;
 
         let bytes_per_row = if let Some(bytes_per_row) = data_layout.bytes_per_row {
             bytes_per_row.get()
@@ -590,6 +649,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         };
 
         let ptr = stage.memory.map(&device.raw, 0, stage_size)?;
+
         unsafe {
             profiling::scope!("copy");
             //TODO: https://github.com/zakarumych/gpu-alloc/issues/13
@@ -641,13 +701,13 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         // NOTE: submission_index is a lower bound approximation on the actual submission index,
         // since we relock mutably later on.
         let submission_index = {
-            let (mut queue_inner_guard, _) = token.lock(&device.queue);
             /* // NOTE: Must wait until the pending writes are locked to assign a submission index, to
             // make sure we don't miss the scheduled writes.
             dst.life_guard
                 .use_at(queue_inner_guard.active_submission_index + 1); */
-            let pending_writes = &mut queue_inner_guard.pending_writes;
-            let mut cmdbuf = device.post_prepare_stage_raw(pending_writes);
+            let mut cmdbuf = device.post_prepare_stage_raw(
+                /*pending_writes*/ &mut queue_inner_guard.pending_writes,
+            );
             unsafe {
                 cmdbuf.pipeline_barrier(
                     super::all_image_stages() | hal::pso::PipelineStage::HOST
@@ -668,7 +728,11 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                     iter::once(region),
                 );
             }
-            pending_writes.consume(stage, cmdbuf);
+            let (mut /*queue_inner_guard*/drop_trackers_guard, _) = /*token1*/token.lock(&device./*queue*/drop_trackers);
+            let pending_writes = &mut */*queue_inner_guard.pending_writes*/drop_trackers_guard;
+            queue_inner_guard
+                .pending_writes
+                .consume(pending_writes, stage, cmdbuf);
             pending_writes.dst_textures.insert(destination.texture);
             queue_inner_guard.active_submission_index + 1
         };
@@ -714,9 +778,11 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             let (mut swap_chain_guard, mut token) = hub.swap_chains.write(&mut token);
             let (bgl_guard, mut token) = hub.bind_group_layouts.write(&mut token);
             let (mut buffer_guard, mut token) = hub.buffers.write(&mut token);
+            let (mut queue_inner_guard, mut token) = token.lock(&device.queue);
             let (texture_guard, mut token) = hub.textures.write(&mut token);
             let (mut trackers, mut token) = token.lock::<super::Trackers>(&device.trackers);
-            let (mut queue_inner_guard, mut token) = token.lock(&device.queue);
+            let (mut drop_trackers_guard, mut token_) =
+                token.lock::<DropTrackers<B>>(&device.drop_trackers);
             let super::QueueInner {
                 ref mut pending_writes,
                 raw: ref mut queue,
@@ -724,8 +790,8 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             } = &mut *queue_inner_guard;
 
             let pending_write_command_buffer;
-            pending_write_command_buffer = pending_writes.finish();
-            for id in mem::take(&mut pending_writes.temp_buffer_resources) {
+            pending_write_command_buffer = pending_writes.finish(&mut drop_trackers_guard);
+            for id in mem::take(&mut /*pending_writes*/drop_trackers_guard.temp_buffer_resources) {
                 let buffer = &mut buffer_guard[id];
                 if buffer.raw.is_none() {
                     return Err(QueueSubmitError::DestroyedBuffer(id.0));
@@ -740,7 +806,8 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                             ..
                         } = map_state
                         {
-                            pending_writes
+                            /*pending_writes*/
+                            drop_trackers_guard
                                 .temp_resources
                                 .push((TempResource::Buffer(stage_buffer), stage_memory));
                         } else {
@@ -762,9 +829,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                         probably a bug in wgpu-core)");
             *active_submission_index = submit_index;
 
+            let mut pending_write_resources;
             let fence = {
                 let mut signal_swapchain_semaphores = SmallVec::<[_; 1]>::new();
-                let (mut command_buffer_guard, mut token) = hub.command_buffers.write(&mut token);
+                let (mut command_buffer_guard, mut token) = hub.command_buffers.write(&mut token_);
 
                 if !command_buffer_ids.is_empty() {
                     profiling::scope!("prepare");
@@ -942,6 +1010,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                     if !required_buffer_inits.map.is_empty() {
                         super::Device::initialize_buffer_memory(
                             &mut *pending_writes,
+                            &mut *drop_trackers_guard,
                             required_buffer_inits,
                             &mut *trackers,
                             &mut *buffer_guard,
@@ -949,6 +1018,13 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                         )?;
                     }
                 }
+
+                // This will schedule destruction of all resources that are no longer needed
+                // by the user but used in the command stream, among other things.
+                pending_write_resources = mem::take(
+                    &mut /*queue_inner_guard.pending_writes*/drop_trackers_guard.temp_resources,
+                );
+                drop(drop_trackers_guard);
 
                 // now prepare the GPU submission
                 let mut fence = device
@@ -981,6 +1057,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                 }
                 fence
             };
+            drop(token_);
             drop(swap_chain_guard);
 
             if let Some(comb_raw) = pending_write_command_buffer {
@@ -988,11 +1065,6 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                     .cmd_allocator
                     .after_submit_internal(comb_raw, submit_index);
             }
-
-            // This will schedule destruction of all resources that are no longer needed
-            // by the user but used in the command stream, among other things.
-            let mut pending_write_resources =
-                mem::take(&mut queue_inner_guard.pending_writes.temp_resources);
             let callbacks = match device.maintain(
                 &hub,
                 false,

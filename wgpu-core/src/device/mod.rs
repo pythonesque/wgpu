@@ -58,6 +58,7 @@ const IMPLICIT_FAILURE: &str = "failed implicit";
 
 pub type DeviceDescriptor<'a> = wgt::DeviceDescriptor<Label<'a>>;
 
+pub(crate) type DropTrackers<B> = queue::DropTrackers<B>;
 pub(crate) type LifetimeTracker<B> = life::LifetimeTracker<B>;
 pub(crate) type SuspectedResources = life::SuspectedResources;
 pub(crate) type Trackers /*<B>*/ = TrackerSet;
@@ -313,6 +314,7 @@ pub struct Device<B: hal::Backend> {
     pub(crate) features: wgt::Features,
     pub(crate) downlevel: wgt::DownlevelProperties,
     spv_options: naga::back::spv::Options,
+    pub(crate) drop_trackers: Mutex<DropTrackers<B>>,
     pub(crate) queue: Mutex</*ManuallyDrop<*/ QueueInner<B> /*>*/>,
     life_tracker: Mutex<life::LifetimeTracker<B>>,
     /* command_allocator: Mutex<command::CommandAllocator<B>>, */
@@ -389,6 +391,7 @@ impl<B: GfxBackend> Device<B> {
                 active_submission_index: 0,
                 pending_writes: queue::PendingWrites::new(),
             }),
+            drop_trackers: Mutex::new(DropTrackers::new()),
             life_guard: LifeGuard::new("<device>"),
             trackers: Mutex::new(TrackerSet::new(B::VARIANT)),
             render_passes: Mutex::new(RenderPassLock {
@@ -443,7 +446,7 @@ impl<B: GfxBackend> Device<B> {
         mut texture_guard: RwLockWriteGuard<Storage<resource::Texture<B>, id::TextureId>>,
         mut trackers: MutexGuard<TrackerSet>,
         queue_inner_guard: MutexGuard<QueueInner<B>>,
-        token: &mut Token<'token, /*ManuallyDrop<*/ QueueInner<B> /*>*/>,
+        token: &mut Token<'token, /*ManuallyDrop<*/ /*QueueInner<B>*/ TrackerSet /*>*/>,
     ) -> Result<Vec<BufferMapPendingCallback>, WaitIdleError> {
         profiling::scope!("maintain", "Device");
         let (mut life_tracker, mut token) = token.lock::<LifetimeTracker<B>>(&self.life_tracker);
@@ -2797,7 +2800,9 @@ impl<B: hal::Backend> Device<B> {
     pub(crate) fn dispose(self) {
         let mut desc_alloc = self.desc_allocator.into_inner();
         let mut mem_alloc = self.mem_allocator.into_inner();
+        let drop_trackers = self.drop_trackers.into_inner();
         self.queue.into_inner().pending_writes.dispose(
+            drop_trackers,
             &self.raw,
             &self.cmd_allocator,
             &mut mem_alloc,
@@ -3221,15 +3226,15 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let device = &device_guard[buffer.device_id.value];
 
         // FIXME: Only need to take in the else clause after we get rid of pending_writes.
-        let (mut queue_inner_guard, mut token) = token.lock(&device.queue);
+        let (mut queue_inner_guard, mut token) = token.lock(&device./*queue*/drop_trackers);
 
         #[cfg(feature = "trace")]
         if let Some(ref trace) = device.trace {
             trace.lock().add(trace::Action::FreeBuffer(buffer_id));
         }
 
-        // NOTE: Since the queue guard is taken, we know this synchronizes with calls to
-        // [queue_write_buffer], fulfilling our safety requirement.
+        // NOTE: By our precondition, we know this synchronizes with calls to [queue_write_buffer],
+        // fulfilling our safety requirement.
         let (raw, memory) = *buffer
             .raw
             .take()
@@ -3237,7 +3242,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         let temp = queue::TempResource::Buffer(raw);
 
-        let pending_writes = &mut queue_inner_guard.pending_writes;
+        let pending_writes = &mut *queue_inner_guard/*.pending_writes*/;
         if pending_writes.dst_buffers.contains(&buffer_id) {
             pending_writes.temp_resources.push((temp, memory));
         } else {
@@ -3283,8 +3288,8 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         let (device_guard, mut token) = hub.devices.read(&mut token);
         let device = &device_guard[device_id];
-        let (mut queue_inner_guard, mut token_) = token.lock(&device.queue);
-        let pending_writes = &mut queue_inner_guard.pending_writes;
+        let (mut queue_inner_guard, mut token_) = token.lock(&device./*queue*/drop_trackers);
+        let pending_writes = &mut *queue_inner_guard/*.pending_writes*/;
         {
             let (mut life_lock, _) = token_.lock::<LifetimeTracker<B>>(&device.life_tracker);
             if pending_writes.dst_buffers.contains(&buffer_id)
@@ -3410,8 +3415,8 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .ok_or(resource::DestroyError::AlreadyDestroyed)?;
         let temp = queue::TempResource::Image(raw);
 
-        let (mut queue_inner_guard, mut token) = token.lock(&device.queue);
-        let pending_writes = &mut queue_inner_guard.pending_writes;
+        let (mut queue_inner_guard, mut token) = token.lock(&device./*queue*/drop_trackers);
+        let pending_writes = &mut *queue_inner_guard/*.pending_writes*/;
         if pending_writes.dst_textures.contains(&texture_id) {
             pending_writes.temp_resources.push((temp, memory));
         } else {
@@ -3455,8 +3460,8 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
         let (device_guard, mut token) = hub.devices.read(&mut token);
         let device = &device_guard[device_id];
-        let (mut queue_inner_guard, mut token_) = token.lock(&device.queue);
-        let pending_writes = &mut queue_inner_guard.pending_writes;
+        let (mut queue_inner_guard, mut token_) = token.lock(&device./*queue*/drop_trackers);
+        let pending_writes = &mut *queue_inner_guard/*.pending_writes*/;
         {
             let (mut life_lock, _) = token_.lock(&device.life_tracker);
             if pending_writes.dst_textures.contains(&texture_id) {
@@ -4760,12 +4765,12 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             let suspected = SuspectedResources::default();
             let (bgl_guard, mut token) = hub.bind_group_layouts.write(&mut token);
             let (buffer_guard, mut token) = hub.buffers.write(&mut token);
+            let (queue_inner_guard, mut token) = token.lock(&device.queue);
             let (texture_guard, mut token) = hub.textures.write(&mut token);
             // NOTE: This is kind of a long time to be holding this lock, which isn't great, but
             // this method will not need to take this lock after hubs are removed (I don't think?),
             // so we don't bother to try to optimize this.
             let (trackers_guard, mut token) = token.lock(&device.trackers);
-            let (queue_inner_guard, mut token) = token.lock(&device.queue);
             device.maintain(
                 hub,
                 force_wait,
@@ -4797,12 +4802,12 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         for (_, device) in device_guard.iter(B::VARIANT) {
             let (bgl_guard, mut token) = hub.bind_group_layouts.write(&mut token);
             let (buffer_guard, mut token) = hub.buffers.write(&mut token);
+            let (queue_inner_guard, mut token) = token.lock(&device.queue);
             let (texture_guard, mut token) = hub.textures.write(&mut token);
             // NOTE: This is kind of a long time to be holding this lock, which isn't great, but
             // this method will not need to take this lock after hubs are removed (I don't think?),
             // so we don't bother to try to optimize this.
             let (trackers_guard, mut token) = token.lock(&device.trackers);
-            let (queue_inner_guard, mut token) = token.lock(&device.queue);
             let cbs = device.maintain(
                 &hub,
                 force_wait,
@@ -5125,9 +5130,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                     families: None,
                 };
 
+                let (mut queue_inner_guard, mut token) = token_.lock(&device.queue);
                 // Since the queue is locked, we can be confident that the submission index is
                 // accurate and not being modified.
-                let (mut queue_inner_guard, _) = token_.lock(&device.queue);
                 buffer.life_guard.use_at(queue_inner_guard.active_submission_index + 1);
                 let cmdbuf = queue_inner_guard.pending_writes.borrow_cmd_buf(&device.cmd_allocator);
                 cmdbuf.pipeline_barrier(
@@ -5138,9 +5143,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                 if buffer.size > 0 {
                     cmdbuf.copy_buffer(&stage_buffer, buf_raw, iter::once(region));
                 }
-                queue_inner_guard.pending_writes
+                let (mut drop_trackers_guard, _) = token.lock::<DropTrackers<B>>(&device.drop_trackers);
+                /*queue_inner_guard.*/drop_trackers_guard
                     .consume_temp(/*queue::TempResource::Buffer(stage_buffer), stage_memory*/id::Valid(buffer_id));
-                queue_inner_guard.pending_writes.dst_buffers.insert(buffer_id);
+                /*queue_inner_guard.pending_writes*/drop_trackers_guard.dst_buffers.insert(buffer_id);
             }
             resource::BufferMapState::Idle => {
                 return Err(resource::BufferAccessError::NotMapped);
