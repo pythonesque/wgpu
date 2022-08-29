@@ -179,7 +179,7 @@ impl RenderPassContext {
 type BufferMapPendingCallback = (resource::BufferMapOperation, resource::BufferMapAsyncStatus);
 
 fn map_buffer<B: hal::Backend>(
-    raw: &B::Device,
+    device: &Device<B>,
     buffer: &mut resource::Buffer<B>,
     offset: hal::buffer::Offset,
     size: BufferAddress,
@@ -192,11 +192,13 @@ fn map_buffer<B: hal::Backend>(
         .as_deref_mut()
         .ok_or(resource::BufferAccessError::Destroyed)?
         .1;
-    let ptr = block.map(raw, offset, size).map_err(DeviceError::from)?;
+    let ptr = block
+        .map(&device.raw, &device.mem_allocator, offset, size)
+        .map_err(DeviceError::from)?;
 
     buffer.sync_mapped_writes = match kind {
         HostMap::Read if !block.is_coherent() => {
-            block.invalidate_range(raw, offset, Some(size))?;
+            block.invalidate_range(&device.raw, offset, Some(size))?;
             None
         }
         HostMap::Write if !block.is_coherent() => Some(hal::memory::Segment {
@@ -225,7 +227,7 @@ fn map_buffer<B: hal::Backend>(
             )
         };
         if zero_init_needs_flush_now {
-            block.flush_range(raw, uninitialized_range.start, Some(num_bytes))?;
+            block.flush_range(&device.raw, uninitialized_range.start, Some(num_bytes))?;
         }
     }
 
@@ -301,7 +303,7 @@ pub struct Device<B: hal::Backend> {
     pub(crate) adapter_id: Stored<id::AdapterId>,
     /* pub(crate) queue_group: hal::queue::QueueGroup<B>, */
     pub(crate) cmd_allocator: command::CommandAllocator<B>,
-    mem_allocator: Mutex<alloc::MemoryAllocator<B>>,
+    mem_allocator: alloc::MemoryAllocator<B>,
     desc_allocator: Mutex<descriptor::DescriptorAllocator<B>>,
     pub(crate) life_guard: LifeGuard,
     /* pub(crate) active_submission_index: SubmissionIndex, */
@@ -384,7 +386,7 @@ impl<B: GfxBackend> Device<B> {
             raw,
             adapter_id,
             cmd_allocator,
-            mem_allocator: Mutex::new(mem_allocator),
+            mem_allocator,
             desc_allocator: Mutex::new(descriptors),
             queue: Mutex::new(QueueInner {
                 raw: queue_group,
@@ -468,7 +470,7 @@ impl<B: GfxBackend> Device<B> {
             .triage_submissions(&self.raw /*, &self.command_allocator*/, force_wait)?;
         let callbacks = life_tracker.handle_mapping(
             hub,
-            &self.raw,
+            self,
             /*&self.trackers, token*/ &mut *trackers,
             &mut *buffer_guard,
         );
@@ -642,10 +644,8 @@ impl<B: GfxBackend> Device<B> {
         }
 
         let requirements = unsafe { self.raw.get_buffer_requirements(&buffer) };
-        let block = self
-            .mem_allocator
-            .lock()
-            .allocate(&self.raw, requirements, mem_usage)?;
+        let (allocator, memory_device) = self.mem_allocator.prepare(&self.raw);
+        let block = memory_device.allocate(allocator, requirements, mem_usage)?;
         block.bind_buffer(&self.raw, &mut buffer)?;
 
         Ok(resource::Buffer {
@@ -767,8 +767,9 @@ impl<B: GfxBackend> Device<B> {
         };
 
         let requirements = unsafe { self.raw.get_image_requirements(&image) };
-        let block = self.mem_allocator.lock().allocate(
-            &self.raw,
+        let (allocator, memory_device) = self.mem_allocator.prepare(&self.raw);
+        let block = memory_device.allocate(
+            allocator,
             requirements,
             gpu_alloc::UsageFlags::FAST_DEVICE_ACCESS,
         )?;
@@ -2768,7 +2769,9 @@ impl<B: hal::Backend> Device<B> {
     pub(crate) fn destroy_buffer(&self, buffer: resource::Buffer<B>) {
         if let Some((raw, memory)) = buffer.raw.map(|buffer| *buffer) {
             unsafe {
-                self.mem_allocator.lock().free(&self.raw, memory);
+                let (mut allocator, memory_device) = self.mem_allocator.prepare(&self.raw);
+                memory_device.free(&mut allocator, memory);
+                drop(allocator);
                 self.raw.destroy_buffer(raw);
             }
         }
@@ -2777,7 +2780,9 @@ impl<B: hal::Backend> Device<B> {
     pub(crate) fn destroy_texture(&self, texture: resource::Texture<B>) {
         if let Some((raw, memory)) = texture.raw.map(|texture| *texture) {
             unsafe {
-                self.mem_allocator.lock().free(&self.raw, memory);
+                let (mut allocator, memory_device) = self.mem_allocator.prepare(&self.raw);
+                memory_device.free(&mut allocator, memory);
+                drop(allocator);
                 self.raw.destroy_image(raw);
             }
         }
@@ -2799,7 +2804,7 @@ impl<B: hal::Backend> Device<B> {
 
     pub(crate) fn dispose(self) {
         let mut desc_alloc = self.desc_allocator.into_inner();
-        let mut mem_alloc = self.mem_allocator.into_inner();
+        let mut mem_alloc = self.mem_allocator;
         let drop_trackers = self.drop_trackers.into_inner();
         self.queue.into_inner().pending_writes.dispose(
             drop_trackers,
@@ -2810,7 +2815,8 @@ impl<B: hal::Backend> Device<B> {
         self.cmd_allocator.destroy(&self.raw);
         unsafe {
             desc_alloc.cleanup(&self.raw);
-            mem_alloc.clear(&self.raw);
+            let (allocator, memory_device) = mem_alloc.prepare_mut(&self.raw);
+            memory_device.clear(allocator);
             let rps = self.render_passes.into_inner();
             for (_, rp) in rps.render_passes {
                 self.raw.destroy_render_pass(rp);
@@ -3001,7 +3007,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             } else if desc.usage.contains(wgt::BufferUsage::MAP_WRITE) {
                 // buffer is mappable, so we are just doing that at start
                 let map_size = buffer.size;
-                let ptr = match map_buffer(&device.raw, &mut buffer, 0, map_size, HostMap::Write) {
+                let ptr = match map_buffer(&device, &mut buffer, 0, map_size, HostMap::Write) {
                     Ok(ptr) => ptr,
                     Err(e) => {
                         let (raw, memory) = *buffer.raw.unwrap();
@@ -3046,7 +3052,8 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                     }
                 };
                 let (stage_buffer, mut stage_memory) = *stage.raw.unwrap();
-                let ptr = match stage_memory.map(&device.raw, 0, stage.size) {
+                let ptr = match stage_memory.map(&device.raw, &device.mem_allocator, 0, stage.size)
+                {
                     Ok(ptr) => ptr,
                     Err(e) => {
                         let (raw, memory) = *buffer.raw.unwrap();
@@ -3155,12 +3162,12 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             });
         }
 
-        buffer
-            .raw
-            .as_deref_mut()
-            .unwrap()
-            .1
-            .write_bytes(&device.raw, offset, data)?;
+        buffer.raw.as_deref_mut().unwrap().1.write_bytes(
+            &device.raw,
+            &device.mem_allocator,
+            offset,
+            data,
+        )?;
 
         Ok(())
     }
@@ -3188,12 +3195,12 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         check_buffer_usage(buffer.usage, wgt::BufferUsage::MAP_READ)?;
         //assert!(buffer isn't used by the GPU);
 
-        buffer
-            .raw
-            .as_deref_mut()
-            .unwrap()
-            .1
-            .read_bytes(&device.raw, offset, data)?;
+        buffer.raw.as_deref_mut().unwrap().1.read_bytes(
+            &device.raw,
+            &device.mem_allocator,
+            offset,
+            data,
+        )?;
 
         Ok(())
     }
@@ -5225,7 +5232,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                         // should still be alive.  So, we can assume the buffer is still mapped,
                         // and unmap it, since the state was Idle.
                         buffer.sync_mapped_writes = None;
-                        block.unmap(&device.raw);
+                        block.unmap(&device.raw, &device.mem_allocator);
                     },
                     _ => {
                         return Err(resource::BufferAccessError::NotMapped);

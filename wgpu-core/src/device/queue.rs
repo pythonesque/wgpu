@@ -83,8 +83,9 @@ impl<B: hal::Backend> PendingWrites<B> {
         if let Some(raw) = self.command_buffer {
             cmd_allocator.discard_internal(raw);
         }
+        let (allocator, memory_device) = mem_allocator.prepare_mut(device);
         for (resource, memory) in drop_trackers.temp_resources {
-            mem_allocator.free(device, memory);
+            memory_device.free(allocator, memory);
             match resource {
                 TempResource::Buffer(buffer) => unsafe {
                     device.destroy_buffer(buffer);
@@ -189,8 +190,9 @@ impl<B: hal::Backend> super::Device<B> {
             self.raw.get_buffer_requirements(&buffer)
         };
 
-        let block = self.mem_allocator.lock().allocate(
-            &self.raw,
+        let (allocator, memory_device) = self.mem_allocator.prepare(&self.raw);
+        let block = memory_device.allocate(
+            allocator,
             requirements,
             gpu_alloc::UsageFlags::UPLOAD | gpu_alloc::UsageFlags::TRANSIENT,
         )?;
@@ -354,7 +356,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         }
 
         let mut stage = device.prepare_stage(data_size)?;
-        stage.memory.write_bytes(&device.raw, 0, data)?;
+        stage
+            .memory
+            .write_bytes(&device.raw, &device.mem_allocator, 0, data)?;
 
         let (mut buffer_guard, mut /*token1*/ token1) = hub.buffers.write(&mut token);
         let dst = buffer_guard
@@ -426,7 +430,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         // on this function.
         let dst_raw: &'a B::Buffer = unsafe { mem::transmute(dst_raw) };
         let (mut trackers, token2) = token_.lock(&device.trackers);
-        let (dst, transition) = trackers
+        let (_, transition) = trackers
             .buffers
             .use_replace(&*buffer_guard, buffer_id, (), BufferUse::COPY_DST)
             .map_err(TransferError::InvalidBuffer)?;
@@ -640,6 +644,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             (size.depth_or_array_layers - 1) * block_rows_per_image + height_blocks;
         let stage_size = stage_bytes_per_row as u64 * block_rows_in_copy as u64;
 
+        // TODO: Do outside the queue lock?
         let mut stage = device.prepare_stage(stage_size)?;
 
         let bytes_per_row = if let Some(bytes_per_row) = data_layout.bytes_per_row {
@@ -648,7 +653,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             width_blocks * bytes_per_block
         };
 
-        let ptr = stage.memory.map(&device.raw, 0, stage_size)?;
+        let ptr = stage
+            .memory
+            .map(&device.raw, &device.mem_allocator, 0, stage_size)?;
 
         unsafe {
             profiling::scope!("copy");
@@ -674,7 +681,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                 }
             }
         }
-        stage.memory.unmap(&device.raw);
+        stage.memory.unmap(&device.raw, &device.mem_allocator);
         if !stage.memory.is_coherent() {
             stage.memory.flush_range(&device.raw, 0, None)?;
         }
@@ -913,7 +920,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                                     // takes the buffer at least immutably).  Moreover, the buffer
                                     // can never be mapped or unmapped after this, because there
                                     // are no more references to it.
-                                    block.unmap(&device.raw);
+                                    block.unmap(&device.raw, &device.mem_allocator);
                                 }
                                 temp_suspected.buffers.push(id);
                             } else {

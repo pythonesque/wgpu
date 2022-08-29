@@ -140,16 +140,16 @@ impl<B: hal::Backend> NonReferencedResources<B> {
     unsafe fn clean(
         &mut self,
         device: &B::Device,
-        memory_allocator_mutex: &Mutex<alloc::MemoryAllocator<B>>,
+        memory_allocator: &alloc::MemoryAllocator<B>,
         descriptor_allocator_mutex: &Mutex<DescriptorAllocator<B>>,
     ) {
         const MAX_LOCK_CHUNKS: usize = /*usize::MAX*/ 256;
         if !self.buffers.is_empty() || !self.images.is_empty() {
-            let mut allocator = memory_allocator_mutex.lock();
+            let (mut allocator, memory_device) = memory_allocator.prepare(device);
             for (i, (raw, memory)) in self.buffers.drain(..).enumerate() {
                 log::trace!("Buffer {:?} is destroyed with memory {:?}", raw, memory);
                 device.destroy_buffer(raw);
-                allocator.free(device, memory);
+                memory_device.free(&mut allocator, memory);
                 if i % MAX_LOCK_CHUNKS == MAX_LOCK_CHUNKS - 1 {
                     MutexGuard::bump(&mut allocator);
                 }
@@ -158,7 +158,7 @@ impl<B: hal::Backend> NonReferencedResources<B> {
             for (i, (raw, memory)) in self.images.drain(..).enumerate() {
                 log::trace!("Image {:?} is destroyed with memory {:?}", raw, memory);
                 device.destroy_image(raw);
-                allocator.free(device, memory);
+                memory_device.free(&mut allocator, memory);
                 if i % MAX_LOCK_CHUNKS == MAX_LOCK_CHUNKS - 1 {
                     MutexGuard::bump(&mut allocator);
                 }
@@ -353,7 +353,7 @@ impl<B: hal::Backend> LifetimeTracker<B> {
     pub fn cleanup(
         mut life: MutexGuard<Self>,
         device: &B::Device,
-        memory_allocator_mutex: &Mutex<alloc::MemoryAllocator<B>>,
+        memory_allocator_mutex: &alloc::MemoryAllocator<B>,
         descriptor_allocator_mutex: &Mutex<DescriptorAllocator<B>>,
     ) {
         profiling::scope!("cleanup");
@@ -697,7 +697,7 @@ impl<B: GfxBackend> LifetimeTracker<B> {
     pub(super) fn handle_mapping<G: GlobalIdentityHandlerFactory>(
         &mut self,
         hub: &Hub<B, G>,
-        raw: &B::Device,
+        device: &super::Device<B>,
         trackers: &mut TrackerSet,
         buffer_guard: &mut Storage<resource::Buffer<B>, id::BufferId>,
     ) -> Vec<super::BufferMapPendingCallback> {
@@ -746,7 +746,7 @@ impl<B: GfxBackend> LifetimeTracker<B> {
                     // NOTE: The actual B::Buffer might be shared right now, but this is okay
                     // because map_buffer doesn't touch that part.
                     let mapped_buffer =
-                        super::map_buffer(raw, buffer, mapping.range.start, size, host);
+                        super::map_buffer(device, buffer, mapping.range.start, size, host);
                     match mapped_buffer {
                         Ok(ptr) => {
                             buffer.map_state = resource::BufferMapState::Active {

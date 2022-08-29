@@ -1445,9 +1445,9 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.5.2"
+version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13bd41f508810a131401606d54ac32a467c97172d74ba7662562ebba5ad07fa0"
+checksum = "074864da206b4973b84eb91683020dbefd6a8c3f0f38e054d93954e891935e4e"
 
 [[package]]
 name = "owned_ttf_parser"
@@ -2212,6 +2212,7 @@ dependencies = [
  "log",
  "loom",
  "naga",
+ "once_cell",
  "parking_lot",
  "profiling",
  "raw-window-handle",
