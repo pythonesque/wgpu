@@ -31,7 +31,8 @@ impl<B: hal::Backend> MemoryAllocator<B> {
             dedicated_threshold: 32 << 20,
             preferred_dedicated_threshold: 8 << 20,
             transient_dedicated_threshold: 128 << 20,
-            linear_chunk: 128 << 20,
+            starting_free_list_chunk: 8 << 20,
+            final_free_list_chunk: 128 << 20,
             minimal_buddy_size: 1 << 10,
             initial_buddy_dedicated_size: 8 << 20,
         };
