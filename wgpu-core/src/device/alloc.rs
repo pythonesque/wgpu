@@ -378,20 +378,20 @@ impl<B: hal::Backend> gpu_alloc::MemoryDevice<Memory<B>> for MemoryDevice<'_, B>
 
         assert!(flags.is_empty());
 
-        let memory_props = /*gpu_alloc::MemoryPropertyFlags::from_bits_truncate(memory_type as u8)*/self.properties.memory_types[memory_type as usize].props;
+        /* let memory_props = /*gpu_alloc::MemoryPropertyFlags::from_bits_truncate(memory_type as u8)*/self.properties.memory_types[memory_type as usize].props;
         // println!("{:?}", memory_props);
-        if memory_props.contains(gpu_alloc::MemoryPropertyFlags::HOST_VISIBLE) {
+        if memory_props.contains(gpu_alloc::MemoryPropertyFlags::HOST_VISIBLE) */{
             // println!("Eager allocate_memory");
             self.device
                 .allocate_memory(hal::MemoryTypeId(memory_type as _), size)
                 .map(OnceCell::with_value)
                 .map_err(|_| gpu_alloc::OutOfMemory::OutOfDeviceMemory)
-        } else {
+        }/* else {
             // println!("Deferred allocate_memory");
             // NOTE: flags are guaranteed empty so we don't need to save them.
             self.alloc.set(Some((size, memory_type)));
             Ok(OnceCell::new())
-        }
+        } */
     }
 
     unsafe fn deallocate_memory(&self, memory: Memory<B>) {
