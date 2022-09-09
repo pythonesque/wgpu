@@ -2815,7 +2815,7 @@ impl<B: hal::Backend> Device<B> {
         self.cmd_allocator.destroy(&self.raw);
         unsafe {
             desc_alloc.cleanup(&self.raw);
-            let (allocator, memory_device) = mem_alloc.prepare_mut(&self.raw);
+            let (allocator, mut memory_device) = mem_alloc.prepare_mut(&self.raw);
             memory_device.clear(allocator);
             let rps = self.render_passes.into_inner();
             for (_, rp) in rps.render_passes {

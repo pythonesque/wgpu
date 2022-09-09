@@ -11,9 +11,17 @@ use std::{borrow::Cow, cell::Cell, iter, ptr::NonNull};
 pub(super) type Memory<B> = OnceCell<<B as hal::Backend>::Memory>;
 
 #[derive(Debug)]
+pub struct AllocatorInner {
+    properties: gpu_alloc::DeviceProperties<'static>,
+    /// Dummy mutex over the internal device allocator, since on some GPUs VRAM usage appears to
+    /// explode if we allocate from multiple threads at once.
+    device_lock: Mutex<()>,
+}
+
+#[derive(Debug)]
 pub struct MemoryAllocator<B: hal::Backend> {
     allocator: Mutex<gpu_alloc::GpuAllocator<Memory<B>>>,
-    properties: gpu_alloc::DeviceProperties<'static>,
+    inner: AllocatorInner,
 }
 
 #[derive(Debug)]
@@ -21,8 +29,8 @@ pub struct MemoryBlock<B: hal::Backend>(gpu_alloc::MemoryBlock<Memory<B>>);
 
 pub(super) struct MemoryDevice<'a, B: hal::Backend> {
     device: &'a B::Device,
+    inner: &'a AllocatorInner,
     alloc: Cell<Option<(u64, u32)>>,
-    properties: &'a gpu_alloc::DeviceProperties<'static>,
 }
 
 impl<B: hal::Backend> MemoryAllocator<B> {
@@ -78,7 +86,10 @@ impl<B: hal::Backend> MemoryAllocator<B> {
                     buffer_device_address: properties.buffer_device_address,
                 },
             )),
-            properties,
+            inner: AllocatorInner {
+                device_lock: Mutex::new(()),
+                properties,
+            },
         }
     }
 
@@ -92,7 +103,7 @@ impl<B: hal::Backend> MemoryAllocator<B> {
         (
             self.allocator.lock(),
             MemoryDevice::<B> {
-                properties: &self.properties,
+                inner: &self.inner,
                 device,
                 alloc: Cell::new(None),
             },
@@ -109,7 +120,7 @@ impl<B: hal::Backend> MemoryAllocator<B> {
         (
             self.allocator.get_mut(),
             MemoryDevice::<B> {
-                properties: &self.properties,
+                inner: &self.inner,
                 device,
                 alloc: Cell::new(None),
             },
@@ -151,7 +162,11 @@ impl<'a, B: hal::Backend> MemoryDevice<'a, B> {
         unsafe { allocator.dealloc(self, block.0) }
     }
 
-    pub fn clear(&self, allocator: &mut gpu_alloc::GpuAllocator<Memory<B>>) {
+    pub fn clear(&mut self, allocator: &mut gpu_alloc::GpuAllocator<Memory<B>>) {
+        // NOTE: Since we take &mut self, we can safely (if the allocator matches up with the lock)
+        // assume that no allocation is currently going on, since allocating requires a
+        // reference to an AllocatorInner, which can only be constructed from its associated
+        // MemoryDevice.
         unsafe { allocator.cleanup(self) }
     }
 
@@ -168,11 +183,15 @@ impl<'a, B: hal::Backend> MemoryDevice<'a, B> {
         let alloc = self.alloc.replace(None);
         if let Some((size, memory_type)) = alloc {
             // println!("Deferred finish");
+            // Take the dummy device lock just to enforce mutual exclusion, even though it
+            // shouldn't actually be necessary for safety.
+            let device_guard = self.inner.device_lock.lock();
             unsafe {
-                match self
+                let res = self
                     .device
-                    .allocate_memory(hal::MemoryTypeId(memory_type as _), size)
-                {
+                    .allocate_memory(hal::MemoryTypeId(memory_type as _), size);
+                drop(device_guard);
+                match res {
                     Ok(memory) => {
                         // Initialize the OnceCell.  We are the only initializer, because anyone else with
                         // a reference to this block got it via reference to an earlier allocation.
@@ -248,7 +267,7 @@ impl<B: hal::Backend> MemoryBlock<B> {
             self.0
                 .map(
                     &MemoryDevice::<B> {
-                        properties: &allocator.properties,
+                        inner: &allocator.inner,
                         device,
                         alloc: Cell::new(None),
                     },
@@ -262,7 +281,7 @@ impl<B: hal::Backend> MemoryBlock<B> {
     pub fn unmap(&mut self, device: &B::Device, allocator: &MemoryAllocator<B>) {
         unsafe {
             self.0.unmap(&MemoryDevice::<B> {
-                properties: &allocator.properties,
+                inner: &allocator.inner,
                 device,
                 alloc: Cell::new(None),
             })
@@ -282,7 +301,7 @@ impl<B: hal::Backend> MemoryBlock<B> {
             self.0
                 .write_bytes(
                     &MemoryDevice::<B> {
-                        properties: &allocator.properties,
+                        inner: &allocator.inner,
                         device,
                         alloc: Cell::new(None),
                     },
@@ -306,7 +325,7 @@ impl<B: hal::Backend> MemoryBlock<B> {
             self.0
                 .read_bytes(
                     &MemoryDevice::<B> {
-                        properties: &allocator.properties,
+                        inner: &allocator.inner,
                         device,
                         alloc: Cell::new(None),
                     },
@@ -378,20 +397,20 @@ impl<B: hal::Backend> gpu_alloc::MemoryDevice<Memory<B>> for MemoryDevice<'_, B>
 
         assert!(flags.is_empty());
 
-        /* let memory_props = /*gpu_alloc::MemoryPropertyFlags::from_bits_truncate(memory_type as u8)*/self.properties.memory_types[memory_type as usize].props;
+        let memory_props = /*gpu_alloc::MemoryPropertyFlags::from_bits_truncate(memory_type as u8)*/self.inner.properties.memory_types[memory_type as usize].props;
         // println!("{:?}", memory_props);
-        if memory_props.contains(gpu_alloc::MemoryPropertyFlags::HOST_VISIBLE) */{
+        if memory_props.contains(gpu_alloc::MemoryPropertyFlags::HOST_VISIBLE) {
             // println!("Eager allocate_memory");
             self.device
                 .allocate_memory(hal::MemoryTypeId(memory_type as _), size)
                 .map(OnceCell::with_value)
                 .map_err(|_| gpu_alloc::OutOfMemory::OutOfDeviceMemory)
-        }/* else {
+        } else {
             // println!("Deferred allocate_memory");
             // NOTE: flags are guaranteed empty so we don't need to save them.
             self.alloc.set(Some((size, memory_type)));
             Ok(OnceCell::new())
-        } */
+        }
     }
 
     unsafe fn deallocate_memory(&self, memory: Memory<B>) {
